@@ -9,7 +9,10 @@ from warnings import warn
 
 import lxml.etree as ET
 import numpy as np
-from scipy.integrate import trapezoid
+from scipy.integrate import trapezoid, quad
+from scipy.optimize import brentq
+from scipy.stats import truncnorm
+from scipy.stats.sampling import NumericalInversePolynomial
 
 import openmc.checkvalue as cv
 from .._xml import get_text
@@ -49,6 +52,10 @@ class Univariate(EqualityMixin, ABC):
             return Uniform.from_xml_element(elem)
         elif distribution == 'powerlaw':
             return PowerLaw.from_xml_element(elem)
+        elif distribution == 'polynomial':
+            return Polynomial.from_xml_element(elem)
+        elif distribution == 'cosine':
+            return Cosine.from_xml_element(elem)
         elif distribution == 'maxwell':
             return Maxwell.from_xml_element(elem)
         elif distribution == 'watt':
@@ -718,6 +725,355 @@ class PowerLaw(Univariate):
 
         return cls(*map(float, params), bias=bias_dist)
 
+class Polynomial(Univariate):
+    """Distribution function with :math:`N`th-degree polynomial probability over
+    a finite interval [a,b].
+
+    Given a vector of coefficients {:math:`c_k`}, the polynomial distribution 
+    has density function :math:`p(x) dx = \sum_{k=0}^N (c_k x^k) dx`. That 
+    is, the coefficients of the polynomial are given in ascending order by the 
+    degree of the term to which they correspond.
+
+    Parameters
+    ----------
+    a : float, optional
+        Lower bound of the sampling interval. Defaults to zero.
+    b : float, optional
+        Upper bound of the sampling interval. Defaults to unity.
+    c : Iterable of float
+        Vector of polynomial coefficients {:math:`c_k`}, normalized such that 
+        cumulative probability equals 1.0 at x = b. Defaults to 
+        :math:`c_0 = \frac{1}{(b - a)}` for a uniform distribution.
+    bias : openmc.stats.Univariate, optional
+        Distribution for biased sampling. Defaults to None for unbiased sampling.
+
+    Attributes
+    ----------
+    a : float
+        Lower bound of the sampling interval
+    b : float
+        Upper bound of the sampling interval
+    c : numpy.ndarray
+        Vector of polynomial coefficients
+    bias : openmc.stats.Univariate or None
+        Distribution for biased sampling
+
+    """
+
+    def __init__(self, a: float = 0.0, b: float = 1.0, c=None, 
+                 bias: Univariate = None):
+        self.a = a
+        self.b = b
+        if c is not None:
+            self.c = c
+        else:
+            self.c = np.array([1/(b - a)])
+        self.bias = bias
+
+    def __len__(self):
+        return len(self.c) + 2
+
+    @property
+    def a(self):
+        return self._a
+
+    @a.setter
+    def a(self, a):
+        cv.check_type('interval lower bound', a, Real)
+        self._a = a
+
+    @property
+    def b(self):
+        return self._b
+
+    @b.setter
+    def b(self, b):
+        cv.check_type('interval upper bound', b, Real)
+        self._b = b
+
+    @property
+    def c(self):
+        return self._c
+
+    @c.setter
+    def c(self, c):
+        if isinstance(c, Real):
+            c = [c]
+        cv.check_type('coefficient values', c, Iterable, Real)
+        
+        # check to make sure PDF is nonnegative over the interval
+        pol = np.polynomial.Polynomial(c, domain=[self.a, self.b])
+        critical_pts = pol.deriv().roots()
+        critical_pts = critical_pts[np.isreal(critical_pts)].real
+        critical_pts = critical_pts[(critical_pts >= self.a) & (critical_pts <= self.b)]
+        critical_pts = np.append(critical_pts, [self.a, self.b])
+
+        for x in critical_pts:
+            p = sum(c[k] * x**k for k in range(len(c)))
+            if p < 0:
+                raise ValueError(
+                    'Polynomial distribution has negative probability density within the sampling interval!')
+
+        # normalize function
+        int_b = sum(c[k]/(k+1) * self.b**(k+1) for k in range(len(c)))
+        int_a = sum(c[k]/(k+1) * self.a**(k+1) for k in range(len(c)))
+        norm = int_b - int_a
+        c_normalized = c / norm
+
+        self._c = np.array(c_normalized, dtype=float)
+
+    @property
+    def bias(self):
+        return self._bias
+    
+    @bias.setter
+    def bias(self, bias):
+        cv.check_type('Biasing distribution', bias, Univariate, none_ok=True)
+        self._bias = bias
+
+    def sample(self, n_samples=1, seed=None):
+        if self.bias is None:
+            # invert CDF numerically
+            rng = np.random.RandomState(seed)
+            xi = rng.random(n_samples)
+            
+            result = []
+            for xi_val in xi:
+                def cdf_root_eqn(x):
+                    return self.cdf(x) - xi_val
+            
+                x_sample = brentq(cdf_root_eqn, self.a, self.b)
+                result.append(x_sample)
+
+            return result, np.ones_like(result)
+        
+        else:
+            if self.bias.bias is not None:
+                raise RuntimeError('Biasing distributions should not have their own bias!')
+            biased_sample = self.bias.sample(n_samples=n_samples,seed=seed)[0]
+            wgt = [self.evaluate(s)/self.bias.evaluate(s) for s in biased_sample]
+            return biased_sample, wgt
+
+    
+    def evaluate(self, x):
+        if x <= self.a:
+            return 0.0
+        elif x >= self.b:
+            return 0.0
+        else:
+            return sum(self.c[k] * x**k for k in range(len(self.c)))
+
+    def cdf(self, x):
+        if x <= self.a:
+            return 0.0
+        elif x >= self.b:
+            return 1.0
+        else:
+            integral, _ = quad(self.evaluate, self.a, x)
+            return integral
+
+    def to_xml_element(self, element_name: str):
+        """Return XML representation of the polynomial distribution
+
+        Parameters
+        ----------
+        element_name : str
+            XML element name
+
+        Returns
+        -------
+        element : lxml.etree._Element
+            XML element containing distribution data
+
+        """
+        element = ET.Element(element_name)
+        element.set("type", "polynomial")
+        params = ET.SubElement(element, "parameters")
+        params.text = f'{self.a} {self.b} ' + ' '.join(map(str, self.c))
+
+        if self.bias is not None:
+            if self.bias.bias is not None:
+                raise RuntimeError('Biasing distributions should not have their own bias!')
+            else:
+                bias_elem = self.bias.to_xml_element("bias")
+                element.append(bias_elem)
+
+        return element
+
+    @classmethod
+    def from_xml_element(cls, elem: ET.Element):
+        """Generate polynomial distribution from an XML element
+
+        Parameters
+        ----------
+        elem : lxml.etree._Element
+            XML element
+
+        Returns
+        -------
+        openmc.stats.Polynomial
+            Distribution generated from XML element
+
+        """
+        params = [float(x) for x in get_text(elem, 'parameters').split()]
+        a, b = params[0], params[1]
+        coeffs = params[2:]
+
+        bias_elem = elem.find('bias')
+        if bias_elem is not None:
+            bias_dist = Univariate.from_xml_element(bias_elem)
+        else:
+            bias_dist = None
+
+        return cls(a, b, coeffs, bias=bias_dist)
+
+class Cosine(Univariate):
+    """Raised cosine distribution function over a finite interval 
+    [:math:`\mu`-s,:math:`\mu`+s].
+
+    The raised cosine distribution has probability density function given by 
+    :math:`\frac{1}{2s}[1 + cos(\frac{x-\mu}{s}\pi)]`. The distribution has
+    a peak value of 1/s at x = :math:`\mu` and is zero outside the interval
+    [:math:`\mu`-s,:math:`\mu`+s].
+
+    Parameters
+    ----------
+    mu : float, optional
+        Location parameter (i.e. mean) of the distribution. Defaults to zero.
+    s : float, optional
+        Scale parameter of the distribution. Defaults to unity.
+    bias : openmc.stats.Univariate, optional
+        Distribution for biased sampling. Defaults to None for unbiased sampling.
+
+    Attributes
+    ----------
+    mu : float
+        Location parameter.
+    s : float
+        Scale parameter.
+    bias : openmc.stats.Univariate or None
+        Distribution for biased sampling
+
+    """
+
+    def __init__(self, mu: float = 0.0, s: float = 1.0, 
+                 bias: Univariate = None):
+        self.mu = mu
+        self.s = s
+        self.bias = bias
+
+    def __len__(self):
+        return 2
+
+    @property
+    def mu(self):
+        return self._mu
+
+    @mu.setter
+    def mu(self, mu):
+        cv.check_type('distribution mean', mu, Real)
+        self._mu = mu
+
+    @property
+    def s(self):
+        return self._s
+
+    @s.setter
+    def s(self, s):
+        cv.check_type('scale parameter', s, Real)
+        if s <= 0.0:
+            raise ValueError(
+                "Cosine distribution scale parameter must be greater than 0.")
+        self._s = s
+
+    @property
+    def bias(self):
+        return self._bias
+    
+    @bias.setter
+    def bias(self, bias):
+        cv.check_type('Biasing distribution', bias, Univariate, none_ok=True)
+        self._bias = bias
+
+    def sample(self, n_samples=1, seed=None):
+        if self.bias is None:
+            rng = NumericalInversePolynomial(
+                self,
+                center=self.mu,
+                domain=(self.mu - self.s, self.mu + self.s)
+                random_state=np.random.RandomState(seed))
+
+            result = rng.rvs(n_samples)
+
+            return result, np.ones_like(result)
+        
+        else:
+            if self.bias.bias is not None:
+                raise RuntimeError('Biasing distributions should not have their own bias!')
+            biased_sample = self.bias.sample(n_samples=n_samples,seed=seed)[0]
+            wgt = [self.evaluate(s)/self.bias.evaluate(s) for s in biased_sample]
+            return biased_sample, wgt
+
+    def evaluate(self, x):
+        return (1/(2*self.s))*(1 + np.cos(((x-self.mu)/self.s)*np.pi))
+    
+    def pdf(self, x: float) -> float:
+        return self.evaluate(x)
+
+    def cdf(self, x: float) -> float:
+        return (1/2)*(1 + (x-self.mu)/self.s + (1/np.pi)*np.sin(np.pi*(x-self.mu)/self.s))
+
+    def to_xml_element(self, element_name: str):
+        """Return XML representation of the cosine distribution
+
+        Parameters
+        ----------
+        element_name : str
+            XML element name
+
+        Returns
+        -------
+        element : lxml.etree._Element
+            XML element containing distribution data
+
+        """
+        element = ET.Element(element_name)
+        element.set("type", "cosine")
+        element.set("parameters", f'{self.mu} {self.s}')'
+
+        if self.bias is not None:
+            if self.bias.bias is not None:
+                raise RuntimeError('Biasing distributions should not have their own bias!')
+            else:
+                bias_elem = self.bias.to_xml_element("bias")
+                element.append(bias_elem)
+
+        return element
+
+    @classmethod
+    def from_xml_element(cls, elem: ET.Element):
+        """Generate polynomial distribution from an XML element
+
+        Parameters
+        ----------
+        elem : lxml.etree._Element
+            XML element
+
+        Returns
+        -------
+        openmc.stats.Polynomial
+            Distribution generated from XML element
+
+        """
+        params = get_text(elem, 'parameters').split()
+
+        bias_elem = elem.find('bias')
+        if bias_elem is not None:
+            bias_dist = Univariate.from_xml_element(bias_elem)
+        else:
+            bias_dist = None
+
+        return cls(*map(float, params), bias=bias_dist)
 
 class Maxwell(Univariate):
     r"""Maxwellian distribution in energy.
@@ -994,6 +1350,10 @@ class Normal(Univariate):
         Mean value of the  distribution
     std_dev : float
         Standard deviation of the Normal distribution
+    a : float, optional
+        Optional lower bound to truncate the sampling interval.
+    b : float, optional
+        Optional upper bound to truncate the sampling interval.
     bias : openmc.stats.Univariate, optional
         Distribution for biased sampling. Defaults to None for unbiased sampling.
 
@@ -1003,13 +1363,19 @@ class Normal(Univariate):
         Mean of the Normal distribution
     std_dev : float
         Standard deviation of the Normal distribution
+    a : float or None
+        Optional lower bound to truncate the sampling interval.
+    b : float or None
+        Optional upper bound to truncate the sampling interval.
     bias : openmc.stats.Univariate or None
         Distribution for biased sampling
     """
 
-    def __init__(self, mean_value, std_dev, bias: Univariate = None):
+    def __init__(self, mean_value, std_dev, a = None, b = None, bias: Univariate = None):
         self.mean_value = mean_value
         self.std_dev = std_dev
+        self.a = a
+        self.b = b
         self.bias = bias
 
     def __len__(self):
@@ -1035,6 +1401,26 @@ class Normal(Univariate):
         self._std_dev = std_dev
 
     @property
+    def a(self):
+        return self._a
+    
+    @a.setter
+    def a(self, a):
+        cv.check_type('Lower sampling bound', a, Real, none_ok=True)
+        self._phi_a = (1/2)*(1 + math.erf((a-self.mean_value)/(self.std_dev * np.sqrt(2))))
+        self._a = a
+
+    @property
+    def b(self):
+        return self._b
+    
+    @b.setter
+    def b(self, b):
+        cv.check_type('Upper sampling bound', b, Real, none_ok=True)
+        self._phi_b = (1/2)*(1 + math.erf((b-self.mean_value)/(self.std_dev * np.sqrt(2))))
+        self._b = b
+
+    @property
     def bias(self):
         return self._bias
     
@@ -1045,9 +1431,25 @@ class Normal(Univariate):
 
     def sample(self, n_samples=1, seed=None):
         if self.bias is None:
-            rng = np.random.RandomState(seed)
-            result = rng.normal(self.mean_value, self.std_dev, n_samples)
-            return result, np.ones_like(result)
+            if self.a is not None or self.b is not None:
+                a_transf = (self.a - self.mean_value) / self.std_dev if self.a is not None else None
+                b_transf = (self.b - self.mean_value) / self.std_dev if self.b is not None else None
+
+                rng = truncnorm(
+                    a=a_transf if a_transf is not None else -np.inf,
+                    b=b_transf if b_transf is not None else np.inf,
+                    loc=self.mean_value,
+                    scale=self.std_dev
+                )
+
+                result = rng.rvs(size=n_samples,random_state=np.random.RandomState(seed))
+                return result, np.ones_like(result)
+
+            else:
+                rng = np.random.RandomState(seed)
+                result = rng.normal(self.mean_value, self.std_dev, n_samples)
+                return result, np.ones_like(result)
+            
         else:
             if self.bias.bias is not None:
                 raise RuntimeError('Biasing distributions should not have their own bias!')
@@ -1056,7 +1458,17 @@ class Normal(Univariate):
             return biased_sample, wgt
     
     def evaluate(self, x):
-        return (1/(np.sqrt(2/np.pi)*self.std_dev))*np.exp(-((x-self.mean_value)**2)/(2*(self.std_dev**2)))
+        std_normal_pdf = (1/(np.sqrt(2/np.pi)*self.std_dev))*np.exp(-((x-self.mean_value)**2)/(2*(self.std_dev**2)))
+
+        if self.a is not None or self.b is not None:
+            # Evaluate CDF at truncation endpoints
+            F_a = (1/2)*(1 + math.erf((self.a-self.mean_value)/(self.std_dev * np.sqrt(2)))) if self.a is not None else 0.0
+            F_b = (1/2)*(1 + math.erf((self.b-self.mean_value)/(self.std_dev * np.sqrt(2)))) if self.b is not None else 1.0
+            
+            return std_normal_pdf/(F_b - F_a)
+
+        else:
+            return std_normal_pdf
 
     def to_xml_element(self, element_name: str):
         """Return XML representation of the Normal distribution
@@ -1074,7 +1486,7 @@ class Normal(Univariate):
         """
         element = ET.Element(element_name)
         element.set("type", "normal")
-        element.set("parameters", f'{self.mean_value} {self.std_dev}')
+        element.set("parameters", f'{self.mean_value} {self.std_dev} {self.a} {self.b}')
 
         if self.bias is not None:
             if self.bias.bias is not None:
