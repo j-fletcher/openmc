@@ -315,11 +315,6 @@ private:
   //! Precompute data structures for efficient sampling
   void precompute_sampling_cdfs();
 
-  //! Interpolate emission rate at given r/a
-  //! \param r_norm Normalized minor radius r/a
-  //! \return Interpolated emission rate
-  double interpolate_emission_rate(double r_norm) const;
-
   //! Sample minor radius from marginal CDF
   //! \param seed Pseudorandom seed pointer
   //! \return Sampled r/a value
@@ -370,8 +365,7 @@ private:
   double phi_extent_; //!< Toroidal angle extent [rad]
 
   // Precomputed data for radial sampling
-  vector<double> radial_cdf_;      //!< CDF for radial sampling
-  vector<double> radial_cdf_grid_; //!< r/a grid for radial CDF
+  vector<double> radial_cdf_; //!< CDF for radial sampling (on r_over_a_ grid)
 
   // Precomputed Bernstein basis functions for poloidal angle sampling.
   // Using the factorization f(r_tilde, alpha) = R* x J* where:
