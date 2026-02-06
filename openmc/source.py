@@ -1,7 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
-from enum import IntEnum
 from numbers import Real
 from pathlib import Path
 import warnings
@@ -19,6 +18,8 @@ from openmc.stats.multivariate import UnitSphere, Spatial
 from openmc.stats.univariate import Univariate
 from ._xml import get_elem_list, get_text
 from .mesh import MeshBase, StructuredMesh, UnstructuredMesh
+from .particle_type import ParticleType
+from .statepoint import _VERSION_STATEPOINT
 from .utility_funcs import input_path
 
 
@@ -267,8 +268,8 @@ class IndependentSource(SourceBase):
         time distribution of source sites
     strength : float
         Strength of the source
-    particle : {'neutron', 'photon', 'electron', 'positron'}
-        Source particle type
+    particle : str or int or openmc.ParticleType
+        Source particle type (name, PDG number, or type)
     domains : iterable of openmc.Cell, openmc.Material, or openmc.Universe
         Domains to reject based on, i.e., if a sampled spatial location is not
         within one of these domains, it will be rejected.
@@ -304,10 +305,9 @@ class IndependentSource(SourceBase):
     type : str
         Indicator of source type: 'independent'
 
-    .. versionadded:: 0.14.0
-
-    particle : {'neutron', 'photon', 'electron', 'positron'}
-        Source particle type
+        .. versionadded:: 0.14.0
+    particle : str or int or openmc.ParticleType
+        Source particle type (alias, PDG number, or GNDS nuclide name)
     constraints : dict
         Constraints on sampled source particles. Valid keys include
         'domain_type', 'domain_ids', 'time_bounds', 'energy_bounds',
@@ -322,7 +322,7 @@ class IndependentSource(SourceBase):
         energy: openmc.stats.Univariate | None = None,
         time: openmc.stats.Univariate | None = None,
         strength: float = 1.0,
-        particle: str = 'neutron',
+        particle: str | int | ParticleType = 'neutron',
         domains: Sequence[openmc.Cell | openmc.Material |
                           openmc.Universe] | None = None,
         constraints: dict[str, Any] | None = None
@@ -407,14 +407,12 @@ class IndependentSource(SourceBase):
         self._time = time
 
     @property
-    def particle(self):
+    def particle(self) -> ParticleType:
         return self._particle
 
     @particle.setter
     def particle(self, particle):
-        cv.check_value('source particle', particle,
-                       ['neutron', 'photon', 'electron', 'positron'])
-        self._particle = particle
+        self._particle = ParticleType(particle)
 
     def populate_xml_element(self, element):
         """Add necessary source information to an XML element
@@ -425,7 +423,7 @@ class IndependentSource(SourceBase):
             XML element containing source data
 
         """
-        element.set("particle", self.particle)
+        element.set("particle", str(self.particle))
         if self.space is not None:
             element.append(self.space.to_xml_element())
         if self.angle is not None:
@@ -900,6 +898,7 @@ class FileSource(SourceBase):
         return cls(**kwargs)
 
 
+<<<<<<< HEAD
 class TokamakSource(SourceBase):
     """A source representing neutron emission from a tokamak plasma.
 
@@ -1306,6 +1305,8 @@ class ParticleType(IntEnum):
     # needed for < Python 3.11
     def __str__(self) -> str:
         return self.__repr__()
+=======
+>>>>>>> develop
 
 
 class SourceParticle:
@@ -1330,8 +1331,8 @@ class SourceParticle:
         Delayed group particle was created in (neutrons only)
     surf_id : int
         Surface ID where particle is at, if any.
-    particle : ParticleType
-        Type of the particle
+    particle : ParticleType or str or int
+        Type of the particle (type, name, or PDG number)
 
     """
 
@@ -1344,7 +1345,7 @@ class SourceParticle:
         wgt: float = 1.0,
         delayed_group: int = 0,
         surf_id: int = 0,
-        particle: ParticleType = ParticleType.NEUTRON
+        particle: ParticleType | str | int = ParticleType.NEUTRON
     ):
 
         self.r = tuple(r)
@@ -1356,9 +1357,16 @@ class SourceParticle:
         self.surf_id = surf_id
         self.particle = particle
 
+    @property
+    def particle(self) -> ParticleType:
+        return self._particle
+
+    @particle.setter
+    def particle(self, particle):
+        self._particle = ParticleType(particle)
+
     def __repr__(self):
-        name = self.particle.name.lower()
-        return f'<SourceParticle: {name} at E={self.E:.6e} eV>'
+        return f'<SourceParticle: {str(self.particle)} at E={self.E:.6e} eV>'
 
     def to_tuple(self) -> tuple:
         """Return source particle attributes as a tuple
@@ -1370,7 +1378,7 @@ class SourceParticle:
 
         """
         return (self.r, self.u, self.E, self.time, self.wgt,
-                self.delayed_group, self.surf_id, self.particle.value)
+                self.delayed_group, self.surf_id, self.particle.pdg_number)
 
 
 def write_source_file(
@@ -1454,12 +1462,7 @@ class ParticleList(list):
         particles = []
         with mcpl.MCPLFile(filename) as f:
             for particle in f.particles:
-                # Determine particle type based on the PDG number
-                try:
-                    particle_type = ParticleType.from_pdg_number(
-                        particle.pdgcode)
-                except ValueError:
-                    particle_type = "UNKNOWN"
+                particle_type = ParticleType(particle.pdgcode)
 
                 # Create a source particle instance. Note that MCPL stores
                 # energy in MeV and time in ms.
@@ -1517,7 +1520,7 @@ class ParticleList(list):
         # Extract the attributes of the source particles into a list of tuples
         data = [(sp.r[0], sp.r[1], sp.r[2], sp.u[0], sp.u[1], sp.u[2],
                  sp.E, sp.time, sp.wgt, sp.delayed_group, sp.surf_id,
-                 sp.particle.name.lower()) for sp in self]
+                 str(sp.particle)) for sp in self]
 
         # Define the column names for the DataFrame
         columns = ['x', 'y', 'z', 'u_x', 'u_y', 'u_z', 'E', 'time', 'wgt',
@@ -1564,6 +1567,7 @@ class ParticleList(list):
         kwargs.setdefault('mode', 'w')
         with h5py.File(filename, **kwargs) as fh:
             fh.attrs['filetype'] = np.bytes_("source")
+            fh.attrs['version'] = np.array([_VERSION_STATEPOINT, 2])
             fh.create_dataset('source_bank', data=arr, dtype=source_dtype)
 
 
@@ -1675,7 +1679,7 @@ def read_collision_track_mcpl(file_path):
             data['material_id'].append(int(values_dict.get('material_id', 0)))
             data['universe_id'].append(int(values_dict.get('universe_id', 0)))
             data['n_collision'].append(int(values_dict.get('n_collision', 0)))
-            data['particle'].append(ParticleType.from_pdg_number(p.pdgcode))
+            data['particle'].append(ParticleType(p.pdgcode))
             data['parent_id'].append(int(values_dict.get('parent_id', 0)))
             data['progeny_id'].append(int(values_dict.get('progeny_id', 0)))
 
