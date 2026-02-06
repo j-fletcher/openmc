@@ -898,7 +898,6 @@ class FileSource(SourceBase):
         return cls(**kwargs)
 
 
-<<<<<<< HEAD
 class TokamakSource(SourceBase):
     """A source representing neutron emission from a tokamak plasma.
 
@@ -1305,8 +1304,6 @@ class ParticleType(IntEnum):
     # needed for < Python 3.11
     def __str__(self) -> str:
         return self.__repr__()
-=======
->>>>>>> develop
 
 
 class SourceParticle:
