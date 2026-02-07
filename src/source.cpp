@@ -1086,7 +1086,7 @@ Position TokamakSource::flux_to_cartesian(
 SourceSite TokamakSource::sample(uint64_t* seed) const
 {
   SourceSite site;
-  site.particle = ParticleType::neutron;
+  site.particle = ParticleType::neutron();
   site.wgt = 1.0;
   site.delayed_group = 0;
   site.time = 0.0;
