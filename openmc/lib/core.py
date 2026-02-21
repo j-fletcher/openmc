@@ -33,6 +33,26 @@ class _SourceSite(Structure):
                 ('parent_id', c_int64),
                 ('progeny_id', c_int64)]
 
+# Numpy dtype matching _SourceSite memory layout (104 bytes) for zero-copy
+# interpretation of the ctypes buffer as a numpy structured array.
+_source_site_dtype = np.dtype([
+    ('r', '<f8', (3,)),
+    ('u', '<f8', (3,)),
+    ('E', '<f8'),
+    ('time', '<f8'),
+    ('wgt', '<f8'),
+    ('delayed_group', '<i4'),
+    ('surf_id', '<i4'),
+    ('particle', '<i4'),
+    ('parent_nuclide', '<i4'),
+    ('parent_id', '<i8'),
+    ('progeny_id', '<i8'),
+])
+
+# Maximum number of source sites to sample per C API call.  Requests for
+# more sites are automatically split into batches of this size so that the
+# intermediate ctypes buffer stays bounded (~104 MB at the default value).
+_SOURCE_SAMPLE_BATCH_SIZE: int = 1_000_000
 
 # Define input type for numpy arrays that will be passed into C++ functions
 # Must be an int or double array, with single dimension that is contiguous
@@ -110,7 +130,7 @@ _dll.openmc_global_bounding_box.argtypes = [POINTER(c_double),
                                             POINTER(c_double)]
 _dll.openmc_global_bounding_box.restype = c_int
 _dll.openmc_global_bounding_box.errcheck = _error_handler
-_dll.openmc_sample_external_source.argtypes = [c_size_t, POINTER(c_uint64), POINTER(_SourceSite)]
+_dll.openmc_sample_external_source.argtypes = [c_size_t, POINTER(c_uint64), POINTER(_SourceSite), c_int]
 _dll.openmc_sample_external_source.restype = c_int
 _dll.openmc_sample_external_source.errcheck = _error_handler
 
@@ -494,8 +514,10 @@ def run_random_ray(output=True):
 
 def sample_external_source(
         n_samples: int = 1000,
-        prn_seed: int | None = None
-) -> openmc.ParticleList:
+        prn_seed: int | None = None,
+        n_threads: int = 1,
+        as_array: bool = False
+) -> openmc.ParticleList | np.ndarray:
     """Sample external source and return source particles.
 
     .. versionadded:: 0.13.1
@@ -507,30 +529,80 @@ def sample_external_source(
     prn_seed : int
         Pseudorandom number generator (PRNG) seed; if None, one will be
         generated randomly.
+    n_threads : int
+        Number of OpenMP threads to use for parallel sampling. Defaults to 1
+        (serial). Each sample gets an independent RNG stream derived from
+        the base seed, so results are deterministic regardless of thread count.
+    as_array : bool
+        If True, return a numpy structured array instead of a
+        :class:`~openmc.ParticleList`.  The array has fields ``'r'`` (float64,
+        shape 3), ``'u'`` (float64, shape 3), ``'E'`` (float64), ``'time'``
+        (float64), ``'wgt'`` (float64), ``'delayed_group'`` (int32),
+        ``'surf_id'`` (int32), and ``'particle'`` (int32).  This avoids the
+        overhead of constructing individual :class:`~openmc.SourceParticle`
+        objects and is substantially faster for large sample counts.
 
     Returns
     -------
-    openmc.ParticleList
-        List of sampled source particles
+    openmc.ParticleList or numpy.ndarray
+        List of sampled source particles, or a structured array when
+        *as_array* is True.
 
     """
     if n_samples <= 0:
         raise ValueError("Number of samples must be positive")
+    if n_threads < 1:
+        raise ValueError("Number of threads must be at least 1")
     if prn_seed is None:
         prn_seed = getrandbits(63)
 
-    # Call into C API to sample source
-    sites_array = (_SourceSite * n_samples)()
-    _dll.openmc_sample_external_source(c_size_t(n_samples), c_uint64(prn_seed), sites_array)
+    batch_size = min(n_samples, _SOURCE_SAMPLE_BATCH_SIZE)
 
-    # Convert to list of SourceParticle and return
-    return openmc.ParticleList([openmc.SourceParticle(
-            r=site.r, u=site.u, E=site.E, time=site.time, wgt=site.wgt,
-            delayed_group=site.delayed_group, surf_id=site.surf_id,
-            particle=openmc.ParticleType(site.particle)
+    # Allocate the ctypes buffer once; it is reused for every batch.
+    sites_array = (_SourceSite * batch_size)()
+
+    # Pre-allocate the output container.  For ``as_array`` mode we create
+    # a single numpy array and fill it in slices; for the ParticleList
+    # path we accumulate SourceParticle objects across batches.
+    if as_array:
+        result = np.empty(n_samples, dtype=_source_site_dtype)
+    else:
+        particles = []
+
+    for offset in range(0, n_samples, batch_size):
+        n_batch = min(batch_size, n_samples - offset)
+
+        # Each batch's base seed is shifted by ``offset`` so that
+        # particle *i* within a batch gets
+        #   init_seed(prn_seed + offset + i, STREAM_SOURCE)
+        # which is identical to the seed it would receive in an
+        # unbatched call.  Results are therefore deterministic
+        # regardless of batch size.
+        _dll.openmc_sample_external_source(
+            c_size_t(n_batch),
+            c_uint64(prn_seed + offset),
+            sites_array,
+            c_int(n_threads),
         )
-        for site in sites_array
-    ])
+
+        if as_array:
+            result[offset:offset + n_batch] = np.frombuffer(
+                sites_array, dtype=_source_site_dtype, count=n_batch
+            )
+        else:
+            particles.extend(
+                openmc.SourceParticle(
+                    r=site.r, u=site.u, E=site.E, time=site.time,
+                    wgt=site.wgt, delayed_group=site.delayed_group,
+                    surf_id=site.surf_id,
+                    particle=openmc.ParticleType(site.particle),
+                )
+                for site in sites_array[:n_batch]
+            )
+
+    if as_array:
+        return result
+    return openmc.ParticleList(particles)
 
 
 def simulation_init():

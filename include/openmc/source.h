@@ -5,6 +5,7 @@
 #define OPENMC_SOURCE_H
 
 #include <cmath>
+#include <atomic>
 #include <limits>
 #include <unordered_set>
 
@@ -31,6 +32,11 @@ constexpr int EXTSRC_REJECT_THRESHOLD {10000};
 //==============================================================================
 // Global variables
 //==============================================================================
+
+// Cumulative counters for source rejection diagnostics. These are atomic to
+// allow thread-safe concurrent sampling of external sources.
+extern std::atomic<int64_t> source_n_accept;
+extern std::atomic<int64_t> source_n_reject;
 
 class Source;
 
@@ -381,6 +387,9 @@ extern "C" void initialize_source();
 SourceSite sample_external_source(uint64_t* seed);
 
 void free_memory_source();
+
+//! Reset cumulative source rejection counters
+void reset_source_rejection_counters();
 
 } // namespace openmc
 
