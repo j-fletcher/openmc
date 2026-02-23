@@ -229,6 +229,9 @@ class Settings:
             stabilization, which may be desirable as stronger diagonal stabilization
             also tends to dampen the convergence rate of the solver, thus requiring
             more iterations to converge.
+        :adjoint_source:
+            Source object used to define localized adjoint source/detector response 
+            function.
 
         .. versionadded:: 0.15.0
     resonance_scattering : dict
@@ -1365,6 +1368,14 @@ class Settings:
                 cv.check_type('diagonal stabilization rho', value, Real)
                 cv.check_greater_than('diagonal stabilization rho',
                                       value, 0.0, True)
+            elif key == 'adjoint_source':
+                if not isinstance(value, MutableSequence):
+                    value = [value]
+                for source in value:
+                    if not isinstance(source, SourceBase):
+                        raise ValueError(
+                            f'Invalid adjoint source type: {type(source)}. '
+                            'Expected openmc.SourceBase.')
             else:
                 raise ValueError(f'Unable to set random ray to "{key}" which is '
                                  'unsupported by OpenMC')
@@ -1908,11 +1919,12 @@ class Settings:
             element = ET.SubElement(root, "random_ray")
             for key, value in self._random_ray.items():
                 if key == 'ray_source' and isinstance(value, SourceBase):
+                    subelement = ET.SubElement(element, 'ray_source')
                     source_element = value.to_xml_element()
                     if source_element.find('bias') is not None:
                         raise RuntimeError(
                             "Ray source distributions should not be biased.")
-                    element.append(source_element)
+                    subelement.append(source_element)
 
                 elif key == 'source_region_meshes':
                     subelement = ET.SubElement(element, 'source_region_meshes')
@@ -1930,8 +1942,12 @@ class Settings:
                         path = f"./mesh[@id='{mesh.id}']"
                         if root.find(path) is None:
                             root.append(mesh.to_xml_element())
-                            if mesh_memo is not None:
+                            if mesh_memo is not None:    
                                 mesh_memo.add(mesh.id)
+                elif key == 'adjoint_source':
+                    subelement = ET.SubElement(element, 'adjoint_source')
+                    for source in value:
+                        subelement.append(source.to_xml_element())
                 elif isinstance(value, bool):
                     subelement = ET.SubElement(element, key)
                     subelement.text = str(value).lower()
@@ -2363,8 +2379,9 @@ class Settings:
             for child in elem:
                 if child.tag in ('distance_inactive', 'distance_active', 'diagonal_stabilization_rho'):
                     self.random_ray[child.tag] = float(child.text)
-                elif child.tag == 'source':
-                    source = SourceBase.from_xml_element(child)
+                elif child.tag == 'ray_source':
+                    source_element = child.find('source')
+                    source = SourceBase.from_xml_element(source_element)
                     if child.find('bias') is not None:
                         raise RuntimeError(
                             "Ray source distributions should not be biased.")
@@ -2381,6 +2398,11 @@ class Settings:
                     self.random_ray['adjoint'] = (
                         child.text in ('true', '1')
                     )
+                elif child.tag == 'adjoint_source':
+                    for subelem in child.findall('source'):
+                        src = SourceBase.from_xml_element(subelem)
+                        # add newly constructed source object to the list
+                        self.random_ray['adjoint_source'].append(src)
                 elif child.tag == 'sample_method':
                     self.random_ray['sample_method'] = child.text
                 elif child.tag == 'source_region_meshes':
