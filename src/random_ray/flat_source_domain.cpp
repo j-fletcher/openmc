@@ -845,7 +845,7 @@ void FlatSourceDomain::output_to_vtk() const
           voxel_positions[z * Ny * Nx + y * Nx + x] = sample;
 
           if (variance_reduction::weight_windows.size() == 1) {
-            WeightWindow ww =
+            auto [ww_found, ww] =
               variance_reduction::weight_windows[0]->get_weight_window(p);
             float weight = ww.lower_weight;
             weight_windows[z * Ny * Nx + y * Nx + x] = weight;
@@ -1300,12 +1300,14 @@ void FlatSourceDomain::set_fw_adjoint_sources()
 #pragma omp parallel for
     for (int64_t sr = 0; sr < n_source_regions(); sr++) {
       int material = source_regions_.material(sr);
+      int temp = source_regions_.temperature_idx(sr);
       if (material == MATERIAL_VOID) {
         continue;
       }
       for (int g = 0; g < negroups_; g++) {
         double sigma_t =
-          sigma_t_[material * negroups_ + g] * source_regions_.density_mult(sr);
+          sigma_t_[(material * ntemperature_ + temp) * negroups_ + g] *
+          source_regions_.density_mult(sr);
         source_regions_.external_source(sr, g) /= sigma_t;
         if (!std::isfinite(source_regions_.external_source(sr, g))) {
           // If the flux is NaN or Inf, set the adjoint source to zero

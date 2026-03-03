@@ -26,17 +26,6 @@ enum class WeightWindowUpdateMethod { MAGIC, FW_CADIS };
 constexpr double DEFAULT_WEIGHT_CUTOFF {1.0e-38}; // default low weight cutoff
 
 //==============================================================================
-// Non-member functions
-//==============================================================================
-
-//! Apply weight windows to a particle
-//! \param[in] p  Particle to apply weight windows to
-void apply_weight_windows(Particle& p);
-
-//! Free memory associated with weight windows
-void free_memory_weight_windows();
-
-//==============================================================================
 // Global variables
 //==============================================================================
 
@@ -137,7 +126,7 @@ public:
 
   //! Retrieve the weight window for a particle
   //! \param[in] p  Particle to get weight window for
-  WeightWindow get_weight_window(const Particle& p) const;
+  std::pair<bool, WeightWindow> get_weight_window(const Particle& p) const;
 
   std::array<int, 2> bounds_size() const;
 
@@ -238,6 +227,26 @@ public:
   // Local FW-CADIS target tallies
   std::vector<size_t> targets_;
 };
+
+//==============================================================================
+// Non-member functions
+//==============================================================================
+
+//! Apply weight windows to a particle
+//! \param[in] p  Particle to apply weight windows to
+void apply_weight_windows(Particle& p);
+
+//! Apply weight window to a particle
+//! \param[in] p  Particle to apply weight window to
+//! \param[in] weight_window WeightWindow to apply
+void apply_weight_window(Particle& p, WeightWindow weight_window);
+
+//! Free memory associated with weight windows
+void free_memory_weight_windows();
+
+//! Search weight window that apply to a particle
+//! \param[in]  p  Particle to search weight window for
+std::pair<bool, WeightWindow> search_weight_window(const Particle& p);
 
 //! Finalize variance reduction objects after all inputs have been read
 void finalize_variance_reduction();
