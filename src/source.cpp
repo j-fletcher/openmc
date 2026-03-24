@@ -219,10 +219,9 @@ SourceSite Source::sample_with_constraints(uint64_t* seed) const
         ++n_local_reject;
 
         // Check per-particle rejection limit
-        if (n_local_reject >= settings::max_source_rejections_per_sample) {
+        if (n_local_reject >= MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
           fatal_error("Exceeded maximum number of source rejections per "
-                      "sample. Please check your source definition or increase "
-                      "Settings.max_source_rejections_per_sample.");
+                      "sample. Please check your source definition.");
         }
 
         // For the "kill" strategy, accept particle but set weight to 0 so that
@@ -235,16 +234,13 @@ SourceSite Source::sample_with_constraints(uint64_t* seed) const
     }
   }
 
-  // Update global rejection counters only when constraints were actually
-  // checked.  When constraints_applied() is true, no rejection is possible
-  // so the reject counter and fraction check can be skipped entirely.
-  if (!constraints_applied()) {
-    if (n_local_reject > 0) {
-      source_n_reject += n_local_reject;
-    }
-    check_rejection_fraction(source_n_reject, source_n_accept);
+  // Flush local rejection count, update accept counter, and check overall
+  // rejection fraction
+  if (n_local_reject > 0) {
+    source_n_reject += n_local_reject;
   }
   ++source_n_accept;
+  check_rejection_fraction(source_n_reject, source_n_accept);
 
   return site;
 }
@@ -405,10 +401,9 @@ SourceSite IndependentSource::sample(uint64_t* seed) const
     // Check for rejection
     if (!accepted) {
       ++n_local_reject;
-      if (n_local_reject >= settings::max_source_rejections_per_sample) {
+      if (n_local_reject >= MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
         fatal_error("Exceeded maximum number of source rejections per "
-                    "sample. Please check your source definition or increase "
-                    "Settings.max_source_rejections_per_sample.");
+                    "sample. Please check your source definition.");
       }
     }
   }
@@ -445,10 +440,9 @@ SourceSite IndependentSource::sample(uint64_t* seed) const
         break;
 
       ++n_local_reject;
-      if (n_local_reject >= settings::max_source_rejections_per_sample) {
+      if (n_local_reject >= MAX_SOURCE_REJECTIONS_PER_SAMPLE) {
         fatal_error("Exceeded maximum number of source rejections per "
-                    "sample. Please check your source definition or increase "
-                    "Settings.max_source_rejections_per_sample.");
+                    "sample. Please check your source definition.");
       }
     }
 
@@ -459,14 +453,10 @@ SourceSite IndependentSource::sample(uint64_t* seed) const
     site.wgt *= (E_wgt * time_wgt);
   }
 
-  // Flush local rejection count and increment accept count atomically
+  // Flush local rejection count into global counter
   if (n_local_reject > 0) {
     source_n_reject += n_local_reject;
   }
-  ++source_n_accept;
-
-  // Periodically check overall rejection fraction
-  check_rejection_fraction(source_n_reject, source_n_accept);
 
   return site;
 }

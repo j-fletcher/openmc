@@ -515,7 +515,6 @@ def run_random_ray(output=True):
 def sample_external_source(
         n_samples: int = 1000,
         prn_seed: int | None = None,
-        n_threads: int = 1,
         as_array: bool = False
 ) -> openmc.ParticleList | np.ndarray:
     """Sample external source and return source particles.
@@ -529,10 +528,6 @@ def sample_external_source(
     prn_seed : int
         Pseudorandom number generator (PRNG) seed; if None, one will be
         generated randomly.
-    n_threads : int
-        Number of OpenMP threads to use for parallel sampling. Defaults to 1
-        (serial). Each sample gets an independent RNG stream derived from
-        the base seed, so results are deterministic regardless of thread count.
     as_array : bool
         If True, return a numpy structured array instead of a
         :class:`~openmc.ParticleList`.  The array has fields ``'r'`` (float64,
@@ -556,52 +551,27 @@ def sample_external_source(
     if prn_seed is None:
         prn_seed = getrandbits(63)
 
-    batch_size = min(n_samples, _SOURCE_SAMPLE_BATCH_SIZE)
-
-    # Allocate the ctypes buffer once; it is reused for every batch.
-    sites_array = (_SourceSite * batch_size)()
-
-    # Pre-allocate the output container.  For ``as_array`` mode we create
-    # a single numpy array and fill it in slices; for the ParticleList
-    # path we accumulate SourceParticle objects across batches.
-    if as_array:
-        result = np.empty(n_samples, dtype=_source_site_dtype)
-    else:
-        particles = []
-
-    for offset in range(0, n_samples, batch_size):
-        n_batch = min(batch_size, n_samples - offset)
-
-        # Each batch's base seed is shifted by ``offset`` so that
-        # particle *i* within a batch gets
-        #   init_seed(prn_seed + offset + i, STREAM_SOURCE)
-        # which is identical to the seed it would receive in an
-        # unbatched call.  Results are therefore deterministic
-        # regardless of batch size.
-        _dll.openmc_sample_external_source(
-            c_size_t(n_batch),
-            c_uint64(prn_seed + offset),
-            sites_array,
-            c_int(n_threads),
-        )
-
-        if as_array:
-            result[offset:offset + n_batch] = np.frombuffer(
-                sites_array, dtype=_source_site_dtype, count=n_batch
-            )
-        else:
-            particles.extend(
-                openmc.SourceParticle(
-                    r=site.r, u=site.u, E=site.E, time=site.time,
-                    wgt=site.wgt, delayed_group=site.delayed_group,
-                    surf_id=site.surf_id,
-                    particle=openmc.ParticleType(site.particle),
-                )
-                for site in sites_array[:n_batch]
-            )
+    # Pre-allocate output array and sample all particles in a single C call
+    result = np.empty(n_samples, dtype=_SourceSite)
+    sites_array = (_SourceSite * n_samples).from_buffer(result)
+    _dll.openmc_sample_external_source(
+        c_size_t(n_samples),
+        c_uint64(prn_seed),
+        sites_array,
+    )
 
     if as_array:
         return result
+
+    particles = [
+        openmc.SourceParticle(
+            r=site.r, u=site.u, E=site.E, time=site.time,
+            wgt=site.wgt, delayed_group=site.delayed_group,
+            surf_id=site.surf_id,
+            particle=openmc.ParticleType(site.particle),
+        )
+        for site in sites_array
+    ]
     return openmc.ParticleList(particles)
 
 
@@ -746,8 +716,8 @@ class TemporarySession:
         self.model = model
 
         # Determine MPI intercommunicator
-        self.init_kwargs.setdefault('intracomm', comm)
-        self.comm = self.init_kwargs['intracomm']
+        self.comm = self.init_kwargs.get('intracomm') or comm
+        self.init_kwargs['intracomm'] = self.comm
 
     def __enter__(self):
         """Initialize the OpenMC library in a temporary directory."""
