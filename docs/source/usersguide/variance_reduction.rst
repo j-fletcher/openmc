@@ -14,14 +14,14 @@ weight windows, then describe how source biasing may be applied.
 
 .. _ww_generator:
 
-------------------------------------
-Generating Weight Windows with MAGIC
-------------------------------------
+-------------------------------------------
+Generating Global Weight Windows with MAGIC
+-------------------------------------------
 
 As discussed in the :ref:`methods section <methods_variance_reduction>`, MAGIC
 is an iterative method that uses flux tally information from a Monte Carlo
 simulation to produce weight windows for a user-defined mesh with the objective 
-of local variance reduction. While generating the weight windows, OpenMC is 
+of global variance reduction. While generating the weight windows, OpenMC is 
 capable of applying the weight windows generated from a previous batch while 
 processing the next batch, allowing for progressive improvement in the weight 
 window quality across iterations.
@@ -74,14 +74,14 @@ the "Using Weight Windows" section below.
 
 .. _usersguide_fw_cadis:
 
-------------------------------------------------------
-Generating Weight Windows with FW-CADIS and Random Ray
-------------------------------------------------------
+----------------------------------------------------------------------
+Generating Global or Local Weight Windows with FW-CADIS and Random Ray
+----------------------------------------------------------------------
 
 Weight window generation with FW-CADIS and random ray in OpenMC uses the same
 exact strategy as with MAGIC. Using FW-CADIS, however, also enables 
-local variance reduction through the :attr:`targets` attribute, which is 
-described later in this section. To enable FW-CADIS, an 
+local variance reduction in fixed source problems through the :attr:`targets` 
+attribute, which is described later in this section. To enable FW-CADIS, an 
 :class:`openmc.WeightWindowGenerator` object is added to the 
 :attr:`openmc.Settings` object, and a ``weight_windows.h5`` will be generated 
 at the end of the simulation. The only procedural difference is that the code 
@@ -154,10 +154,10 @@ random ray mode can be found in the :ref:`Random Ray User Guide <random_ray>`.
     assigning to ``model.settings.random_ray['source_region_meshes']``) and for
     weight window generation.
 
-3. (Optional) If local variance reduction is desired, populate the  
-   :attr:`targets` attribute with an :class:`openmc.Tallies` instance or an 
-   iterable of tally IDs indicating the tallies of interest for variance 
-   reduction::
+3. (Optional) If local variance reduction is desired in a fixed-source problem,  
+   populate the :attr:`targets` attribute with an :class:`openmc.Tallies` 
+   instance or an iterable of tally IDs indicating the tallies of interest for 
+   variance reduction::
 
     # Build a new example and WWG for local variance reduction
     from openmc.examples import random_ray_three_region_cube_with_detectors

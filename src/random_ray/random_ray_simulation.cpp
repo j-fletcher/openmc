@@ -168,14 +168,12 @@ void validate_random_ray_inputs()
                     "constrained by domain id (cell, material, or universe) in "
                     "random ray mode.");
       } else if (is->domain_ids().size() > 0 && sp) {
-        // If both a domain constraint and a non-default point source location
-        // are specified, notify user that domain constraint takes precedence.
-        if (sp->r().x == 0.0 && sp->r().y == 0.0 && sp->r().z == 0.0) {
-          warning("Fixed source has both a domain constraint and a point "
-                  "type spatial distribution. The domain constraint takes "
-                  "precedence in random ray mode -- point source coordinate "
-                  "will be ignored.");
-        }
+        // If both a domain constraint and a point source location are
+        // specified, notify user that domain constraint takes precedence.
+        warning("Fixed source has both a domain constraint and a point "
+                "type spatial distribution. The domain constraint takes "
+                "precedence in random ray mode -- point source coordinate "
+                "will be ignored.");
       }
 
       // Check that a discrete energy distribution was used
@@ -220,14 +218,12 @@ void validate_random_ray_inputs()
                     "constrained by domain id (cell, material, or universe) in "
                     "random ray mode.");
       } else if (is->domain_ids().size() > 0 && sp) {
-        // If both a domain constraint and a non-default point source location
-        // are specified, notify user that domain constraint takes precedence.
-        if (sp->r().x == 0.0 && sp->r().y == 0.0 && sp->r().z == 0.0) {
-          warning("Adjoint source has both a domain constraint and a point "
-                  "type spatial distribution. The domain constraint takes "
-                  "precedence in random ray mode -- point source coordinate "
-                  "will be ignored.");
-        }
+        // If both a domain constraint and a point source location are
+        // specified, notify user that domain constraint takes precedence.
+        warning("Adjoint source has both a domain constraint and a point "
+                "type spatial distribution. The domain constraint takes "
+                "precedence in random ray mode -- point source coordinate "
+                "will be ignored.");
       }
 
       // Check that a discrete energy distribution was used
@@ -294,6 +290,8 @@ void openmc_finalize_random_ray()
   FlatSourceDomain::volume_estimator_ = RandomRayVolumeEstimator::HYBRID;
   FlatSourceDomain::volume_normalized_flux_tallies_ = false;
   FlatSourceDomain::adjoint_ = false;
+  FlatSourceDomain::fw_cadis_local_ = false;
+  FlatSourceDomain::fw_cadis_local_targets_.clear();
   FlatSourceDomain::mesh_domain_map_.clear();
   RandomRay::ray_source_.reset();
   RandomRay::source_shape_ = RandomRaySourceShape::FLAT;
@@ -355,12 +353,54 @@ void RandomRaySimulation::prepare_fw_fixed_sources_adjoint()
 void RandomRaySimulation::prepare_local_fixed_sources_adjoint()
 {
   if (settings::run_mode == RunMode::FIXED_SOURCE) {
+    domain_->set_fw_adjoint_sources();
+  }
+}
+
+void RandomRaySimulation::prepare_local_fixed_sources_adjoint()
+{
+  if (settings::run_mode == RunMode::FIXED_SOURCE) {
     domain_->set_local_adjoint_sources();
   }
 }
 
+void RandomRaySimulation::prepare_adjoint_simulation(bool fw_adjoint)
+{
+  reset_timers();
+
+  if (mpi::master)
+    header("ADJOINT FLUX SOLVE", 3);
+
+  if (fw_adjoint) {
+    // Forward simulation has already been run;
+    // Configure the domain for adjoint simulation and
+    // re-initialize OpenMC general data structures
+    FlatSourceDomain::adjoint_ = true;
+
+    openmc_simulation_init();
+
+    prepare_fw_fixed_sources_adjoint();
+  } else {
+    // Initialize adjoint fixed sources
+    domain_->apply_meshes();
+    prepare_local_fixed_sources_adjoint();
+    domain_->count_external_source_regions();
+  }
+
+  domain_->k_eff_ = 1.0;
+
+  // Transpose scattering matrix
+  domain_->transpose_scattering_matrix();
+
+  // Swap nu_sigma_f and chi
+  domain_->nu_sigma_f_.swap(domain_->chi_);
+}
+
 void RandomRaySimulation::simulate()
 {
+  // Begin main simulation timer
+  simulation::time_total.start();
+
   // Random ray power iteration loop
   while (simulation::current_batch < settings::n_batches) {
     // Initialize the current batch
@@ -449,6 +489,26 @@ void RandomRaySimulation::simulate()
   } // End random ray power iteration loop
 
   domain_->count_external_source_regions();
+
+  // End main simulation timer
+  simulation::time_total.stop();
+
+  // Normalize and save the final forward flux
+  double source_normalization_factor =
+    domain_->compute_fixed_source_normalization_factor() /
+    (settings::n_batches - settings::n_inactive);
+
+#pragma omp parallel for
+  for (uint64_t se = 0; se < domain_->n_source_elements(); se++) {
+    domain_->source_regions_.scalar_flux_final(se) *=
+      source_normalization_factor;
+  }
+
+  // Finalize OpenMC
+  openmc_simulation_finalize();
+
+  // Output all simulation results
+  output_simulation_results();
 }
 
 void RandomRaySimulation::output_simulation_results() const
@@ -662,31 +722,8 @@ void openmc_run_random_ray()
     // Initialize fixed sources, if present
     sim.apply_fixed_sources_and_mesh_domains();
 
-    // Begin main simulation timer
-    openmc::simulation::time_total.start();
-
     // Execute random ray simulation
     sim.simulate();
-
-    // End main simulation timer
-    openmc::simulation::time_total.stop();
-
-    // Normalize and save the final forward flux
-    double source_normalization_factor =
-      sim.domain()->compute_fixed_source_normalization_factor() /
-      (openmc::settings::n_batches - openmc::settings::n_inactive);
-
-#pragma omp parallel for
-    for (uint64_t se = 0; se < sim.domain()->n_source_elements(); se++) {
-      sim.domain()->source_regions_.scalar_flux_final(se) *=
-        source_normalization_factor;
-    }
-
-    // Finalize OpenMC
-    openmc_simulation_finalize();
-
-    // Output all simulation results
-    sim.output_simulation_results();
   }
 
   //////////////////////////////////////////////////////////
@@ -697,45 +734,9 @@ void openmc_run_random_ray()
     return;
   }
 
-  openmc::reset_timers();
-
-  if (openmc::mpi::master)
-    openmc::header("ADJOINT FLUX SOLVE", 3);
-
-  if (fw_adjoint) {
-    // Forward simulation has already been run;
-    // Configure the domain for adjoint simulation and
-    // re-initialize OpenMC general data structures
-    openmc::FlatSourceDomain::adjoint_ = true;
-
-    openmc_simulation_init();
-
-    sim.prepare_fw_fixed_sources_adjoint();
-  } else {
-    // Initialize adjoint fixed sources
-    sim.prepare_local_fixed_sources_adjoint();
-  }
-
-  sim.domain()->k_eff_ = 1.0;
-
-  // Transpose scattering matrix
-  sim.domain()->transpose_scattering_matrix();
-
-  // Swap nu_sigma_f and chi
-  sim.domain()->nu_sigma_f_.swap(sim.domain()->chi_);
-
-  // Begin main simulation timer
-  openmc::simulation::time_total.start();
+  // Setup for adjoint simulation
+  sim.prepare_adjoint_simulation(fw_adjoint);
 
   // Execute random ray simulation
   sim.simulate();
-
-  // End main simulation timer
-  openmc::simulation::time_total.stop();
-
-  // Finalize OpenMC
-  openmc_simulation_finalize();
-
-  // Output all simulation results
-  sim.output_simulation_results();
 }
