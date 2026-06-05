@@ -677,6 +677,67 @@ void WeightWindows::update_weights(const Tally* tally, const std::string& value,
   }
 }
 
+void WeightWindows::rescale_bounds_range(const int max_ww_decades, const double ratio)
+{
+  if (max_ww_decades <= 0.0) {
+    return;
+  } else {
+    int e_bins = lower_ww_.shape(0);
+    int64_t mesh_bins = lower_ww_.shape(1);
+
+    double max_lower = 0.0;
+    double min_lower = std::numeric_limits<double>::max();
+#pragma omp parallel for collapse(2) schedule(static) reduction(max : max_lower) reduction(min : min_lower)
+    for (int e = 0; e < e_bins; e++) {
+      for (int64_t m = 0; m < mesh_bins; m++) {
+        double v = lower_ww_(e, m);
+        if (v > 0.0) {
+          if (v > max_lower) max_lower = v;
+          if (v < min_lower) min_lower = v;
+        }
+      }
+    }
+
+    if (max_lower > 0.0 && min_lower < max_lower) {
+      double log_max = std::log10(max_lower);
+      double log_min = std::log10(min_lower);
+      double current_decades = log_max - log_min;
+
+      if (current_decades > max_ww_decades) {
+        double scale = max_ww_decades / current_decades;
+
+#pragma omp parallel for collapse(2) schedule(static)
+        for (int e = 0; e < e_bins; e++) {
+          for (int64_t m = 0; m < mesh_bins; m++) {
+            double v = lower_ww_(e, m);
+            if (v > 0.0) {
+              double log_v = std::log10(v);
+              // Anchor at log_min: distances from log_min are
+              // compressed by scale
+              double new_log_v = log_min + (log_v - log_min) * scale;
+              lower_ww_(e, m) = std::pow(10.0, new_log_v);
+            }
+          }
+        }
+
+        // Recompute max after rescaling
+        max_lower = min_lower * std::pow(10.0, max_ww_decades);
+      }
+
+      double shift_factor = 0.5 / max_lower;
+#pragma omp parallel for collapse(2) schedule(static)
+      for (int e = 0; e < e_bins; e++) {
+        for (int64_t m = 0; m < mesh_bins; m++) {
+          if (lower_ww_(e, m) > 0.0) {
+            lower_ww_(e, m) *= shift_factor;
+            upper_ww_(e, m) = ratio * lower_ww_(e, m);
+          }
+        }
+      }
+    }
+  }
+}
+
 void WeightWindows::check_tally_update_compatibility(const Tally* tally)
 {
   // define the set of allowed filters for the tally
@@ -773,6 +834,10 @@ WeightWindowsGenerator::WeightWindowsGenerator(pugi::xml_node node)
 
   update_interval_ = std::stoi(get_node_value(node, "update_interval"));
   on_the_fly_ = get_node_value_bool(node, "on_the_fly");
+
+  if (check_for_node(node, "max_ww_decades")) {
+    max_ww_decades_ = std::stoi(get_node_value(node, "max_ww_decades"));
+  }
 
   std::vector<double> e_bounds;
   if (check_for_node(node, "energy_bounds")) {
@@ -915,6 +980,9 @@ void WeightWindowsGenerator::update() const
   }
 
   wws->update_weights(tally, tally_value_, threshold_, ratio_, method_);
+
+  // Rescale weight windows to max decades if desired
+  wws->rescale_bounds_range(max_ww_decades_, ratio_);
 
   // if we're not doing on the fly generation, reset the tally results once
   // we're done with the update

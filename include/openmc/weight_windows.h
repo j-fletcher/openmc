@@ -119,6 +119,10 @@ public:
     double threshold = 1.0, double ratio = 5.0,
     WeightWindowUpdateMethod method = WeightWindowUpdateMethod::MAGIC);
 
+  //! Rescale lower bounds such that the total range is within specified 
+  //! number of decades
+  void rescale_bounds_range(const int max_ww_decades, const double ratio);
+
   // NOTE: This is unused for now but may be used in the future
   //! Write weight window settings to an HDF5 file
   //! \param[in] group  HDF5 group to write to
@@ -216,6 +220,8 @@ public:
   int32_t update_interval_;         //!< Determines how often updates occur
   bool on_the_fly_; //!< Whether or not to keep tally results between batches or
                     //!< realizations
+
+  int max_ww_decades_ {C_NONE}; //<! Maximum range in decades of the lower bounds
 
   // MAGIC update parameters
   std::string tally_value_ {

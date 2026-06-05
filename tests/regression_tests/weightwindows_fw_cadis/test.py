@@ -25,7 +25,10 @@ def test_random_ray_adjoint_fixed_source():
     ww_mesh.upper_right = (width, width, width)
 
     wwg = openmc.WeightWindowGenerator(
-        method="fw_cadis", mesh=ww_mesh, max_realizations=model.settings.batches)
+        method="fw_cadis", 
+        mesh=ww_mesh, 
+        max_realizations=model.settings.batches,
+        max_ww_decades=2)
     model.settings.weight_window_generators = wwg
     model.settings.random_ray['volume_estimator'] = 'naive'
 

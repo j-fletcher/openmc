@@ -509,6 +509,8 @@ class WeightWindowGenerator:
         The number of tally realizations between updates.
     on_the_fly : bool
         Whether or not to apply weight windows on the fly.
+    max_ww_decades : int
+        Maximum range in decades of the weight window lower bounds
 
     Attributes
     ----------
@@ -532,6 +534,8 @@ class WeightWindowGenerator:
         A set of parameters related to the update.
     on_the_fly : bool
         Whether or not to apply weight windows on the fly.
+    max_ww_decades : int
+        Maximum range in decades of the weight window lower bounds
     """
 
     _WWG_PARAMS = {'value': str, 'threshold': float, 'ratio': float}
@@ -545,7 +549,8 @@ class WeightWindowGenerator:
         targets: openmc.Tallies | Iterable[int] | None = None,
         max_realizations: int = 1,
         update_interval: int = 1,
-        on_the_fly: bool = True
+        on_the_fly: bool = True,
+        max_ww_decades: int | None = None
     ):
         self._update_parameters = None
 
@@ -559,6 +564,7 @@ class WeightWindowGenerator:
         self.max_realizations = max_realizations
         self.update_interval = update_interval
         self.on_the_fly = on_the_fly
+        self.max_ww_decades = max_ww_decades
 
     def __repr__(self):
         string = type(self).__name__ + '\n'
@@ -683,6 +689,17 @@ class WeightWindowGenerator:
         cv.check_type('on the fly generation', otf, bool)
         self._on_the_fly = otf
 
+    @property
+    def max_ww_decades(self) -> int;
+        return self._max_ww_decades
+    
+    @max_ww_decades.setter
+    def max_ww_decades(self, dec):
+        if dec is not None:
+            cv.check_type('maximum number of weight window decades', dec, int)
+            cv.check_greater_than('maximum number of weight window decades', dec, 0.0)
+        self._max_ww_decades = dec
+
     def _update_parameters_subelement(self, element: ET.Element):
         if not self.update_parameters:
             return
@@ -728,6 +745,9 @@ class WeightWindowGenerator:
         update_interval_elem.text = str(self.update_interval)
         otf_elem = ET.SubElement(element, 'on_the_fly')
         otf_elem.text = str(self.on_the_fly).lower()
+        if self.max_ww_decades is not None:
+            dec_elem = ET.SubElement(element, 'max_ww_decades')
+            dec_elem.text = str(self.max_ww_decades)
         method_elem = ET.SubElement(element, 'method')
         method_elem.text = self.method
         if self.targets is not None:
@@ -779,6 +799,7 @@ class WeightWindowGenerator:
         wwg.max_realizations = int(get_text(elem, 'max_realizations'))
         wwg.update_interval = int(get_text(elem, 'update_interval'))
         wwg.on_the_fly = bool(get_text(elem, 'on_the_fly'))
+        wwg.max_ww_decades = int(get_text(elem, 'max_ww_decades'))
         wwg.method = get_text(elem, 'method')
         targets_elem = elem.find('targets')
         if targets_elem is not None:
