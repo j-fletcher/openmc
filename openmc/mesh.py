@@ -3834,8 +3834,62 @@ class UnitSphereTriangularMesh(AngularMesh):
 
         return cls(triangles, mesh_id=mesh_id)
     
-def triangularize_unit_sphere_mesh(mesh : UnitSpherePointset, data = None):
-    pass
+def triangularize_unit_sphere_mesh(mesh, data = None):
+    """
+    Parameters
+    ----------
+    mesh : UnitSpherePointset
+        Pointset mesh on which data is represented
+    data : ndarray
+
+    Returns
+    -------
+    faces : list[SphericalTriangle]
+        List of M triangular mesh cells with geometric info
+    new_data : (M,) ndarray
+        New list of data points associated with each triangle 
+        in the subdivided mesh
+    """
+    sv = SphericalVoronoi(mesh.points)
+    sv.sort_vertices_of_regions()
+
+    faces = []
+    new_data = []
+
+    for pole_index, region in enumerate(sv.regions):
+
+        pole = points[pole_index]
+        verts = sv.vertices[region]
+
+        n = len(verts)
+        areas = np.empty(n)
+
+        # Compute area of each spherical triangle
+        for i in range(n):
+            v1 = verts[i]
+            v2 = verts[(i + 1) % n]
+
+            num = np.dot(pole, np.cross(v1, v2))
+            denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
+            areas[i] = 2 * np.arctan2(num, denom)
+
+        total_area = areas.sum()
+
+        for i in range(n):
+            v1 = verts[i]
+            v2 = verts[(i + 1) % n]
+
+            triangle = np.stack((pole, v1, v2))
+
+            faces.append(
+                SphericalTriangle(
+                    vertices=triangle,
+                    area=areas[i]
+                )
+            )
+            new_data.append(scores[pole_index] * areas[i] / total_area)
+
+    return faces, np.asarray(new_data)
 
 
 def _read_meshes(elem):
