@@ -902,6 +902,47 @@ public:
   vector<Position> points_;
 };
 
+class UnitSphereTriangularMesh : public AngularMesh {
+public:
+  UnitSphereTriangularMesh() = default;
+  explicit UnitSphereTriangularMesh(vector<double> vertices);
+  UnitSphereTriangularMesh(pugi::xml_node node);
+  UnitSphereTriangularMesh(hid_t group);
+
+  //! Direction and Position are the same type underneath--can override
+  Direction sample_element(int32_t bin, uint64_t* seed) const override;
+
+  //! Point-location on an arbitrary spherical triangular mesh is
+  //! difficult, so we leave this unimplemented.
+  //! get_bin() would only be called on an angular mesh in case of
+  //! anisotropic effects, such as angle-dependent weight windows, which a
+  //! particle encounters during transport.
+  int get_bin(Direction u) const override
+  {
+    fatal_error("get_bin() is not supported for UnitSpereTriangularMesh");
+  }
+
+  int n_bins() const override { return static_cast<int>(vertices_.size() / 9); }
+
+  //! Return surface area of a specific triangle
+  double volume(int bin) const override;
+
+  void material_volumes(int nx, int ny, int nz, int max_materials,
+    int32_t* materials, double* volumes, double* bboxes) const override
+  {
+    fatal_error(
+      "material_volumes() is not supported for UnitSphereTriangularMesh");
+  }
+
+  std::string get_mesh_type() const override { return mesh_type; }
+  static const std::string mesh_type;
+
+  void to_hdf5_inner(hid_t group) const override;
+
+  vector<double> vertices_;
+  vector<double> areas_;
+};
+
 #ifdef OPENMC_DAGMC_ENABLED
 
 class MOABMesh : public UnstructuredMesh {
