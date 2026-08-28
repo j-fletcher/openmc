@@ -912,6 +912,11 @@ class MeshFilter(Filter):
     @mesh.setter
     def mesh(self, mesh):
         cv.check_type('filter mesh', mesh, openmc.MeshBase)
+        if isinstance(mesh, openmc.AngularMesh):
+            raise TypeError(
+                "Angular mesh classes cannot be used with spatial MeshFilter classes."
+            )
+        
         self._mesh = mesh
         if isinstance(mesh, openmc.UnstructuredMesh):
             if mesh.has_statepoint_data:
@@ -1137,6 +1142,10 @@ class MeshMaterialFilter(MeshFilter):
     @mesh.setter
     def mesh(self, mesh):
         cv.check_type('filter mesh', mesh, openmc.MeshBase)
+        if isinstance(mesh, openmc.AngularMesh):
+            raise TypeError(
+                "Angular mesh classes cannot be used with spatial MeshFilter classes."
+            )
         self._mesh = mesh
 
     @Filter.bins.setter
@@ -1279,6 +1288,10 @@ class MeshSurfaceFilter(MeshFilter):
     @MeshFilter.mesh.setter
     def mesh(self, mesh):
         cv.check_type('filter mesh', mesh, openmc.MeshBase)
+        if isinstance(mesh, openmc.AngularMesh):
+            raise TypeError(
+                "Angular mesh classes cannot be used with spatial MeshFilter classes."
+            )
         self._mesh = mesh
 
         # Take the product of mesh indices and surface-crossing names, using
@@ -1364,9 +1377,12 @@ class MeshAngularFilter(MeshFilter):
     ----------
     mesh : openmc.MeshBase
         The mesh object that events will be tallied onto
-    translation : Iterable of float
-        This array specifies a vector that is used to translate (shift)
-        the mesh for this filter
+    rotation : Iterable of float
+        This array specifies the angles in degrees about the x, y, and z axes
+        that the mesh should be rotated. A rotation matrix can also be 
+        specified directly by setting this attribute to a nested list 
+        (or 2D numpy array) that specifies each element of the matrix. See 
+        also: MeshFilter.rotation.
     id : int
         Unique identifier for the filter
     bins : list of tuple
@@ -1377,7 +1393,7 @@ class MeshAngularFilter(MeshFilter):
         The number of filter bins
 
     """
-    def __init__(self,  mesh, filter_id=None):
+    def __init__(self, mesh, filter_id=None):
         self.mesh = mesh
         self.id = filter_id
         self._rotation = None
@@ -1388,6 +1404,10 @@ class MeshAngularFilter(MeshFilter):
         string += '{: <16}=\t{}\n'.format('\tID', self.id)
         string += '{: <16}=\t{}\n'.format('\tRotation', self.rotation)
         return string
+    
+    @property
+    def mesh(self):
+        return self._mesh
 
     @mesh.setter
     def mesh(self, mesh):
