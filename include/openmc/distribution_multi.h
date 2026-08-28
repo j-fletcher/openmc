@@ -8,6 +8,7 @@
 #include "openmc/distribution.h"
 #include "openmc/error.h"
 #include "openmc/position.h"
+#include "openmc/mesh.h"
 
 namespace openmc {
 

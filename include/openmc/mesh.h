@@ -931,14 +931,7 @@ public:
   int n_bins() const override { return static_cast<int>(vertices_.size() / 9); }
 
   //! Return surface area of a specific triangle
-  double volume(int bin) const override;
-
-  void material_volumes(int nx, int ny, int nz, int max_materials,
-    int32_t* materials, double* volumes, double* bboxes) const override
-  {
-    fatal_error(
-      "material_volumes() is not supported for UnitSphereTriangularMesh");
-  }
+  double volume(int bin) const override { return areas_[bin]; }
 
   std::string get_mesh_type() const override { return mesh_type; }
   static const std::string mesh_type;

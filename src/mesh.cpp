@@ -344,6 +344,8 @@ const std::unique_ptr<Mesh>& Mesh::create(
     model::meshes.push_back(make_unique<SphericalMesh>(dataset));
   } else if (mesh_type == UnitSpherePointset::mesh_type) {
     model::meshes.push_back(make_unique<UnitSpherePointset>(dataset));
+  } else if (mesh_type == UnitSphereTriangularMesh::mesh_type) {
+    model::meshes.push_back(make_unique<UnitSphereTriangularMesh>(dataset));
 #ifdef OPENMC_DAGMC_ENABLED
   } else if (mesh_type == UnstructuredMesh::mesh_type &&
              mesh_library == MOABMesh::mesh_lib_type) {
@@ -2508,13 +2510,12 @@ int UnitSpherePointset::get_bin(Direction u) const
 // Unit sphere triangular mesh implementation
 //==============================================================================
 
-const std::string UnitSphereTriangularMesh::mesh_type =
-  "triangular_unit_sphere";
+const std::string UnitSphereTriangularMesh::mesh_type = "angular_triangular";
 
 UnitSphereTriangularMesh::UnitSphereTriangularMesh(vector<double> vertices)
   : vertices_(std::move(vertices))
 {
-  if (flat.size() % 9 != 0) {
+  if (vertices.size() % 9 != 0) {
     fatal_error(fmt::format("Vertex array for triangular unit sphere mesh {} "
                             "does not describe a whole number of triangles.",
       id_));
@@ -2620,19 +2621,13 @@ UnitSphereTriangularMesh::UnitSphereTriangularMesh(hid_t group)
   }
 }
 
-double volume(int bin) const
-{
-  return areas_[bin];
-}
-
 void UnitSphereTriangularMesh::to_hdf5_inner(hid_t mesh_group) const
 {
   write_dataset(mesh_group, "vertices", vertices_);
   write_dataset(mesh_group, "areas", areas_);
 }
 
-Direction UnitSphereTriangularMesh::sample_element(
-  const MeshIndex& ijk, uint64_t* seed) const
+Direction UnitSphereTriangularMesh::sample_element(int32_t bin, uint64_t* seed) const
 {
   int offset = 9 * bin;
 

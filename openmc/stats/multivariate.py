@@ -61,6 +61,8 @@ class UnitSphere(ABC):
             return Isotropic.from_xml_element(elem)
         elif distribution == 'monodirectional':
             return Monodirectional.from_xml_element(elem)
+        elif distribution == 'mesh-angular':
+            return MeshAngular.from_xml_element(elem)
 
 
 class PolarAzimuthal(UnitSphere):
@@ -401,7 +403,7 @@ class MeshAngular(UnitSphere):
         """
         element = ET.Element('space')
 
-        element.set('type', 'mesh_angular')
+        element.set('type', 'mesh-angular')
         element.set("mesh_id", str(self.mesh.id))
 
         if self.strengths is not None:

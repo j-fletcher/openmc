@@ -5,6 +5,7 @@
 
 #include "openmc/constants.h"
 #include "openmc/error.h"
+#include "openmc/mesh.h"
 #include "openmc/math_functions.h"
 #include "openmc/random_dist.h"
 #include "openmc/random_lcg.h"
@@ -25,6 +26,8 @@ unique_ptr<UnitSphereDistribution> UnitSphereDistribution::create(
     return UPtrAngle {new Monodirectional(node)};
   } else if (type == "mu-phi") {
     return UPtrAngle {new PolarAzimuthal(node)};
+  } else if (type == "mesh-angular") {
+    return UPtrAngle {new MeshAngular(node)};
   } else {
     fatal_error(fmt::format(
       "Invalid angular distribution for external source: {}", type));
