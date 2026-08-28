@@ -808,6 +808,9 @@ WeightWindowsGenerator::WeightWindowsGenerator(pugi::xml_node node)
         std::end(FlatSourceDomain::fw_cadis_local_targets_),
         std::begin(targets_), std::end(targets_));
     }
+    if (check_for_node(node, "source_biasing")) {
+      source_biasing_ = get_node_value_bool(node, "source_biasing");
+    }
   } else {
     fatal_error(fmt::format(
       "Unknown weight window update method '{}' specified", method_string));

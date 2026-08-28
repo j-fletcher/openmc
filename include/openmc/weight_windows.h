@@ -230,6 +230,8 @@ public:
 
   // Local FW-CADIS target tallies
   std::vector<size_t> targets_;
+  // FW-CADIS source biasing
+  bool source_biasing_;
 };
 
 //==============================================================================
