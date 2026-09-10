@@ -157,8 +157,6 @@ Filter* Filter::create(const std::string& type, int32_t id)
     return Filter::create<PolarFilter>(id);
   } else if (type == "reaction") {
     return Filter::create<ReactionFilter>(id);
-  } else if (type == "sourcebias") {
-    return Filter::create<SourceBiasFilter>(id);
   } else if (type == "surface") {
     return Filter::create<SurfaceFilter>(id);
   } else if (type == "spatiallegendre") {

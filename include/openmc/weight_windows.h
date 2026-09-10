@@ -27,8 +27,6 @@ enum class WeightWindowUpdateMethod { MAGIC, FW_CADIS };
 
 constexpr double DEFAULT_WEIGHT_CUTOFF {1.0e-38}; // default low weight cutoff
 
-constexpr std::array<int, 2> VERSION_SOURCE_BIAS {1, 0};
-
 //==============================================================================
 // Global variables
 //==============================================================================

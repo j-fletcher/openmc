@@ -815,7 +815,7 @@ SourceSite CorrelatedSource::sample(uint64_t* seed) const
   if (!group_bounds_.empty()) {
     double e_lo = group_bounds_[g];
     double e_hi = group_bounds_[g + 1];
-    site.E = e_lo * std::pow(e_hi / e_lo, prn(seed))
+    site.E = e_lo * std::pow(e_hi / e_lo, prn(seed));
   }
 
   site.wgt = weights_[flat];

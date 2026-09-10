@@ -1396,7 +1396,7 @@ class Settings:
     def source_bias_file(self, value: PathLike | None):
         if value is None:
             self._source_bias_file = None
-        else
+        else:
             cv.check_type('source bias file', value, PathLike)
             self._source_bias_file = input_path(value)
 
