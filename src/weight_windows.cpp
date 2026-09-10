@@ -10,9 +10,11 @@
 
 #include "openmc/error.h"
 #include "openmc/file_utils.h"
+#include "openmc/geometry.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/mesh.h"
 #include "openmc/message_passing.h"
+#include "openmc/mgxs_interface.h"
 #include "openmc/nuclide.h"
 #include "openmc/output.h"
 #include "openmc/particle.h"
@@ -22,8 +24,10 @@
 #include "openmc/search.h"
 #include "openmc/settings.h"
 #include "openmc/simulation.h"
+#include "openmc/source.h"
 #include "openmc/tallies/filter_energy.h"
 #include "openmc/tallies/filter_mesh.h"
+#include "openmc/tallies/filter_meshangular.h"
 #include "openmc/tallies/filter_particle.h"
 #include "openmc/tallies/tally.h"
 #include "openmc/xml_interface.h"
@@ -41,6 +45,7 @@ namespace variance_reduction {
 std::unordered_map<int32_t, int32_t> ww_map;
 openmc::vector<unique_ptr<WeightWindows>> weight_windows;
 openmc::vector<unique_ptr<WeightWindowsGenerator>> weight_windows_generators;
+openmc::vector<unique_ptr<SourceBias>> source_biases;
 
 } // namespace variance_reduction
 
@@ -753,6 +758,310 @@ void WeightWindows::to_hdf5(hid_t group) const
   close_group(ww_group);
 }
 
+//==============================================================================
+// SourceBias implementation
+//==============================================================================
+
+SourceBias::SourceBias(int32_t spatial_mesh_idx, int32_t angle_mesh_idx,
+  vector<double> energy_bounds, int32_t ww_id)
+  : spatial_mesh_idx_(spatial_mesh_idx), angle_mesh_idx_(angle_mesh_idx),
+    energy_bounds_(std::move(energy_bounds)), ww_id_(ww_id)
+{
+  int64_t spatial_bins = model::meshes[spatial_mesh_idx_]->n_bins();
+  int64_t angle_bins =
+    angle_mesh_idx_ == C_NONE ? 1 : model::meshes[angle_mesh_idx_]->n_bins();
+  int64_t energy_bins = energy_bounds_.empty() ? 1 : energy_bounds_.size() - 1;
+
+  flux_ = tensor::Tensor<double>({static_cast<size_t>(spatial_bins),
+    static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
+}
+
+void SourceBias::update(const Tally* tally)
+{
+  int score_index = tally->score_index("flux");
+  if (score_index == C_NONE) {
+    fatal_error(fmt::format("A 'flux' score is required on tally {} used "
+                            "for source biasing.",
+      tally->id()));
+  }
+
+  const int64_t spatial_bins = flux_.shape(0);
+  const int64_t angle_bins = flux_.shape(1);
+  const int64_t energy_bins = flux_.shape(2);
+
+  const auto& results = tally->results();
+
+  const int n_filters = static_cast<int>(tally->filters().size());
+  std::vector<int64_t> filt_shape(n_filters);
+  std::vector<int64_t> filt_stride(n_filters, 1);
+  for (int i = 0; i < n_filters; ++i) {
+    filt_shape[i] = model::tally_filters[tally->filters(i)]->n_bins();
+  }
+  for (int i = n_filters - 2; i >= 0; --i) {
+    filt_stride[i] = filt_stride[i + 1] * filt_shape[i + 1];
+  }
+
+  std::vector<FilterType> filter_types = tally->filter_types();
+  auto position_of = [&filter_types](FilterType type) -> int {
+    auto it = std::find(filter_types.begin(), filter_types.end(), type);
+    return it == filter_types.end()
+             ? -1
+             : static_cast<int>(it - filter_types.begin());
+  };
+
+  const int pos_mesh = position_of(FilterType::MESH);
+  const int pos_energy = position_of(FilterType::ENERGY);
+  const int pos_angle = position_of(FilterType::MESH_ANGULAR);
+
+  if (pos_mesh == -1) {
+    fatal_error(fmt::format(
+      "Tally {} used for source biasing is missing a spatial mesh filter.",
+      tally->id()));
+  }
+  if (angle_bins > 1 && pos_angle == -1) {
+    fatal_error(
+      fmt::format("Tally {} used for source biasing is missing the expected "
+                  "mesh-angular filter.",
+        tally->id()));
+  }
+
+  const int i_sum = static_cast<int>(TallyResult::SUM);
+  const int64_t n = tally->n_realizations_;
+
+#pragma omp parallel for collapse(3) schedule(static)
+  for (int64_t m = 0; m < spatial_bins; ++m) {
+    for (int64_t a = 0; a < angle_bins; ++a) {
+      for (int64_t e = 0; e < energy_bins; ++e) {
+        int64_t flat = m * filt_stride[pos_mesh];
+        if (pos_energy != -1)
+          flat += e * filt_stride[pos_energy];
+        if (pos_angle != -1)
+          flat += a * filt_stride[pos_angle];
+
+        flux_(m, a, e) = n > 0 ? results(flat, score_index, i_sum) / n : 0.0;
+      }
+    }
+  }
+}
+
+void SourceBias::to_hdf5(hid_t group) const
+{
+  hid_t sb_group = create_group(group, fmt::format("source_bias_{}", ww_id_));
+
+  write_dataset(
+    sb_group, "spatial_mesh", model::meshes[spatial_mesh_idx_]->id());
+  write_dataset(sb_group, "angle_mesh",
+    angle_mesh_idx_ == C_NONE ? C_NONE : model::meshes[angle_mesh_idx_]->id());
+  write_dataset(sb_group, "energy_bounds", energy_bounds_);
+  // Get biased source strength B(r,Omega,g) = flux(r,Omega,g) *
+  // unbiased_strength(r,Omega,g) and the per-voxel weight 1/flux(r,Omega,g)
+  const int64_t spatial_bins = flux_.shape(0);
+  const int64_t angle_bins = flux_.shape(1);
+  const int64_t energy_bins = flux_.shape(2);
+
+  tensor::Tensor<double> biased_strength({static_cast<size_t>(spatial_bins),
+    static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
+  tensor::Tensor<double> weights({static_cast<size_t>(spatial_bins),
+    static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
+
+  for (int64_t m = 0; m < spatial_bins; ++m) {
+    for (int64_t a = 0; a < angle_bins; ++a) {
+      for (int64_t e = 0; e < energy_bins; ++e) {
+        double psi = flux_(m, a, e);
+        biased_strength(m, a, e) = psi * unbiased_strength_(m, a, e);
+        // A weight is only meaningful where the biased distribution can
+        // actually place a particle (psi > 0, so B could be nonzero there).
+        // Elsewhere B is guaranteed to be 0 too (since B = psi * S), so a
+        // Discrete distribution built from B will never select that voxel
+        // and this placeholder value is never used.
+        weights(m, a, e) = psi > 0.0 ? 1.0 / psi : 0.0;
+      }
+    }
+  }
+
+  write_dataset(sb_group, "biased_source_strength", biased_strength);
+  write_dataset(sb_group, "weights", weights);
+
+  close_group(sb_group);
+}
+
+void SourceBias::compute_unbiased_strength(int64_t n_samples_per_source)
+{
+  const int64_t spatial_bins = flux_.shape(0);
+  const int64_t angle_bins = flux_.shape(1);
+  const int64_t energy_bins = flux_.shape(2);
+
+  unbiased_strength_ =
+    tensor::Tensor<double>({static_cast<size_t>(spatial_bins),
+      static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
+  for (int64_t m = 0; m < spatial_bins; ++m) {
+    for (int64_t a = 0; a < angle_bins; ++a) {
+      for (int64_t e = 0; e < energy_bins; ++e) {
+        unbiased_strength_(m, a, e) = 0.0;
+      }
+    }
+  }
+
+  // A precomputed file takes priority over sampling model::external_sources
+  const std::string fwd_path = "forward_source_mesh.h5";
+  if (file_exists(fwd_path)) {
+    load_forward_source_mesh(fwd_path);
+    return;
+  }
+
+  Mesh* spatial_mesh = model::meshes[spatial_mesh_idx_].get();
+  Mesh* angle_mesh =
+    angle_mesh_idx_ == C_NONE ? nullptr : model::meshes[angle_mesh_idx_].get();
+
+  // Normalize by total strength across all forward external sources
+  double total_strength = 0.0;
+  for (const auto& source_ptr : model::external_sources) {
+    auto* is = dynamic_cast<IndependentSource*>(source_ptr.get());
+    if (!is) {
+      fatal_error("Computing an unbiased source strength distribution "
+                  "requires all external sources to be independent "
+                  "sources.");
+    }
+    total_strength += is->strength();
+  }
+  if (total_strength <= 0.0) {
+    fatal_error("Total external source strength must be positive to "
+                "compute an unbiased source strength distribution.");
+  }
+
+  // Fixed local seed, not part of the sequence used for transport
+  uint64_t seed = 1;
+
+  tensor::Tensor<double> spatial_angle_counts(
+    {static_cast<size_t>(spatial_bins), static_cast<size_t>(angle_bins)});
+
+  for (const auto& source_ptr : model::external_sources) {
+    Source* s = source_ptr.get();
+    auto* is = dynamic_cast<IndependentSource*>(s);
+    double relative_strength = is->strength() / total_strength;
+
+    auto* energy_dist = dynamic_cast<Discrete*>(is->energy());
+    if (!energy_dist) {
+      fatal_error(
+        "Source biasing requires all external sources to use a Discrete "
+        "(multigroup) energy distribution, matching the requirement for "
+        "random ray fixed source problems.");
+    }
+    vector<double> group_prob(energy_bins, 0.0);
+    const auto& e_vals = energy_dist->x();
+    const auto& e_probs = energy_dist->prob();
+    for (std::size_t i = 0; i < e_vals.size(); ++i) {
+      int g = data::mg.get_group_index(e_vals[i]);
+      if (g >= 0 && g < energy_bins)
+        group_prob[g] += e_probs[i];
+    }
+
+    // Monte Carlo estimate of the joint (spatial, angular) distribution.
+    // Energy is not sampled when solver type is Random Ray.
+    for (int64_t m = 0; m < spatial_bins; ++m) {
+      for (int64_t a = 0; a < angle_bins; ++a) {
+        spatial_angle_counts(m, a) = 0.0;
+      }
+    }
+
+    for (int64_t i = 0; i < n_samples_per_source; ++i) {
+      SourceSite site = is->sample(&seed);
+
+      int32_t m = spatial_mesh->get_bin(site.r);
+      if (m < 0)
+        continue;
+
+      int32_t a = angle_mesh ? angle_mesh->get_bin(site.u) : 0;
+      if (angle_mesh && a < 0)
+        continue;
+
+      spatial_angle_counts(m, a) += 1.0;
+    }
+
+    for (int64_t m = 0; m < spatial_bins; ++m) {
+      for (int64_t a = 0; a < angle_bins; ++a) {
+        double frac = spatial_angle_counts(m, a) / n_samples_per_source;
+        if (frac == 0.0)
+          continue;
+        for (int64_t e = 0; e < energy_bins; ++e) {
+          unbiased_strength_(m, a, e) +=
+            relative_strength * frac * group_prob[e];
+        }
+      }
+    }
+  }
+}
+
+void SourceBias::load_forward_source_mesh(const std::string& path)
+{
+  hid_t file = file_open(path, 'r');
+
+  std::string filetype;
+  read_attribute(file, "filetype", filetype);
+  if (filetype != "forward_source") {
+    file_close(file);
+    fatal_error(fmt::format("File '{}' is not a forward source file.", path));
+  }
+
+  std::array<int, 2> file_version;
+  read_attribute(file, "version", file_version);
+  if (file_version[0] != VERSION_SOURCE_BIAS[0]) {
+    file_close(file);
+    fatal_error(fmt::format("File '{}' has version {} which is incompatible "
+                            "with the expected version ({}).",
+      path, file_version, VERSION_SOURCE_BIAS));
+  }
+
+  // Check that the file's spatial mesh matches the one this SourceBias was
+  // built with.
+  int32_t spatial_mesh_id;
+  read_dataset(file, "spatial_mesh", spatial_mesh_id);
+  int32_t expected_spatial_id = model::meshes[spatial_mesh_idx_]->id();
+  if (spatial_mesh_id != expected_spatial_id) {
+    file_close(file);
+    fatal_error(fmt::format(
+      "Spatial mesh in '{}' (id {}) does not match the spatial mesh used "
+      "for source biasing (id {}).",
+      path, spatial_mesh_id, expected_spatial_id));
+  }
+
+  int32_t angle_mesh_id;
+  read_dataset(file, "angle_mesh", angle_mesh_id);
+  int32_t expected_angle_id =
+    angle_mesh_idx_ == C_NONE ? C_NONE : model::meshes[angle_mesh_idx_]->id();
+  if (angle_mesh_id != expected_angle_id) {
+    file_close(file);
+    fatal_error(fmt::format(
+      "Angular mesh in '{}' (id {}) does not match the angular mesh used "
+      "for source biasing (id {}, or none expected).",
+      path, angle_mesh_id, expected_angle_id));
+  }
+
+  vector<double> file_energy_bounds;
+  read_dataset<double>(file, "energy_bounds", file_energy_bounds);
+  if (file_energy_bounds.size() != energy_bounds_.size()) {
+    file_close(file);
+    fatal_error(fmt::format(
+      "Energy group structure in '{}' ({} boundaries) does not match the "
+      "structure used for source biasing ({} boundaries).",
+      path, file_energy_bounds.size(), energy_bounds_.size()));
+  }
+  for (std::size_t i = 0; i < energy_bounds_.size(); ++i) {
+    double tol = 1e-6 * std::max(1.0, std::abs(energy_bounds_[i]));
+    if (std::abs(file_energy_bounds[i] - energy_bounds_[i]) > tol) {
+      file_close(file);
+      fatal_error(fmt::format(
+        "Energy group boundary {} in '{}' ({}) does not match the value "
+        "used for source biasing ({}).",
+        i, path, file_energy_bounds[i], energy_bounds_[i]));
+    }
+  }
+
+  read_dataset<double>(file, "unbiased_source_strength", unbiased_strength_);
+
+  file_close(file);
+}
+
 WeightWindowsGenerator::WeightWindowsGenerator(pugi::xml_node node)
 {
   // read information from the XML node
@@ -810,6 +1119,12 @@ WeightWindowsGenerator::WeightWindowsGenerator(pugi::xml_node node)
     }
     if (check_for_node(node, "source_biasing")) {
       source_biasing_ = get_node_value_bool(node, "source_biasing");
+      if (source_biasing_ &&
+          check_for_node(node, "angular_biasing_quadrature")) {
+        int32_t angle_mesh_id =
+          std::stoi(get_node_value(node, "angular_biasing_quadrature"));
+        angle_mesh_idx_ = model::mesh_map[angle_mesh_id];
+      }
     }
   } else {
     fatal_error(fmt::format(
@@ -898,6 +1213,39 @@ void WeightWindowsGenerator::create_tally()
   auto pf = dynamic_cast<ParticleFilter*>(particle_filter);
   pf->set_particles({&particle_type, 1});
   ww_tally->add_filter(particle_filter);
+
+  if (!source_biasing_ || method_ != WeightWindowUpdateMethod::FW_CADIS) {
+    // technically the second condition isn't totally absolute
+    return;
+  }
+
+  // Now add a tally for source biasing
+  Tally* sb_tally = Tally::create();
+  sb_tally_idx_ = model::tally_map[sb_tally->id()];
+  sb_tally->set_scores({"flux"});
+
+  // Add same particle, energy, and spatial mesh filters
+  for (int i = 0; i < ww_tally->filters().size(); ++i) {
+    sb_tally->add_filter(model::tally_filters[ww_tally->filters(i)].get());
+  }
+
+  // Add angular dependency if requested
+  if (angle_mesh_idx_ != C_NONE) {
+    auto meshangle_filter = Filter::create("meshangular");
+    auto maf = dynamic_cast<MeshAngularFilter*>(meshangle_filter);
+    maf->set_mesh(angle_mesh_idx_);
+    sb_tally->add_filter(meshangle_filter);
+  }
+
+  // Create the object that will hold the accumulated flux data used to
+  // build a biased forward source once the simulation finishes
+  auto sb = std::make_unique<SourceBias>(
+    mesh_idx, angle_mesh_idx_, e_bounds, wws->id());
+  sb_idx_ = static_cast<int32_t>(variance_reduction::source_biases.size());
+  variance_reduction::source_biases.push_back(std::move(sb));
+
+  // Pre-compute unbiased source strength distribution
+  variance_reduction::source_biases[sb_idx_]->compute_unbiased_strength();
 }
 
 void WeightWindowsGenerator::update() const
@@ -924,6 +1272,15 @@ void WeightWindowsGenerator::update() const
   // we're done with the update
   if (!on_the_fly_)
     tally->reset();
+
+  // Update the source bias flux data the same way, from its own tally
+  if (source_biasing_ && method_ == WeightWindowUpdateMethod::FW_CADIS) {
+    Tally* sb_tally = model::tallies[sb_tally_idx_].get();
+    variance_reduction::source_biases[sb_idx_]->update(sb_tally);
+
+    if (!on_the_fly_)
+      sb_tally->reset();
+  }
 
   // TODO: deactivate or remove tally once weight window generation is
   // complete
@@ -1365,6 +1722,45 @@ extern "C" int openmc_weight_windows_export(const char* filename)
   close_group(weight_windows_group);
 
   file_close(ww_file);
+
+  // If any source biasing data has been generated, export it too
+  if (!variance_reduction::source_biases.empty()) {
+    std::string sb_name = "source_bias.h5";
+
+    write_message(
+      fmt::format("Exporting source bias data to {}...", sb_name), 5);
+
+    hid_t sb_file = file_open(sb_name, 'w');
+
+    write_attribute(sb_file, "filetype", "source_bias");
+    write_attribute(sb_file, "version", VERSION_SOURCE_BIAS);
+
+    hid_t sb_mesh_group = create_group(sb_file, "meshes");
+    std::vector<int32_t> sb_mesh_ids;
+
+    auto write_mesh_once = [&](int32_t mesh_idx) {
+      if (mesh_idx == C_NONE)
+        return;
+      int32_t mesh_id = model::meshes[mesh_idx]->id();
+      if (std::find(sb_mesh_ids.begin(), sb_mesh_ids.end(), mesh_id) !=
+          sb_mesh_ids.end())
+        return;
+      sb_mesh_ids.push_back(mesh_id);
+      model::meshes[mesh_idx]->to_hdf5(sb_mesh_group);
+    };
+
+    for (const auto& sb : variance_reduction::source_biases) {
+      sb->to_hdf5(sb_file);
+      write_mesh_once(sb->spatial_mesh_idx());
+      write_mesh_once(sb->angle_mesh_idx());
+    }
+
+    write_attribute(sb_mesh_group, "n_meshes", sb_mesh_ids.size());
+    write_attribute(sb_mesh_group, "ids", sb_mesh_ids);
+    close_group(sb_mesh_group);
+
+    file_close(sb_file);
+  }
 
   return 0;
 }
