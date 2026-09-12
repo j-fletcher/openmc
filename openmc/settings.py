@@ -1571,7 +1571,7 @@ class Settings:
                 path = f"./mesh[@id='{source.space.mesh.id}']"
                 if root.find(path) is None:
                     root.append(source.space.mesh.to_xml_element())
-            if isinstance(source, [MeshSource, CorrelatedSource]):
+            if isinstance(source, (MeshSource, CorrelatedSource)):
                 path = f"./mesh[@id='{source.mesh.id}']"
                 if root.find(path) is None:
                     root.append(source.mesh.to_xml_element())
