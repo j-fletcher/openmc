@@ -333,7 +333,9 @@ class SourceBase(ABC):
         init_kwargs.setdefault('output', False)
         init_kwargs.setdefault('args', ['-c'])
 
-        S = np.zeros((n_space, n_angle, n_energy))
+        counts = np.zeros((n_space, n_angle, n_energy))
+        n_drawn = 0
+        avg_per_voxel = 0.0
 
         with openmc.lib.TemporarySession(model, **init_kwargs):
             space_lib_mesh = openmc.lib.meshes[space_mesh.id]
@@ -401,7 +403,7 @@ class SourceBase(ABC):
         # sites, so that source support falling outside 
         # space_mesh/angle_mesh/energy_bins correctly shows up as
         # unrepresented probability mass rather than being renormalized away
-        S /= min_samples
+        S = counts / n_drawn
 
         with h5py.File(filename, 'w') as fh:
             fh.attrs['filetype'] = np.bytes_('forward_source')
