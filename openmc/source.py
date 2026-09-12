@@ -291,6 +291,7 @@ class SourceBase(ABC):
         """
         import openmc.lib
 
+        min_samples = int(min_samples)
         if max_samples is None:
             max_samples = 10 * min_samples
         if max_samples < min_samples:
@@ -353,12 +354,8 @@ class SourceBase(ABC):
                     n_samples=batch_size, as_array=True)
                 n_drawn += batch_size
 
-                r = np.stack(
-                    [data['r']['x'], data['r']['y'], data['r']['z']],
-                    axis=-1)
-                u = np.stack(
-                    [data['u']['x'], data['u']['y'], data['u']['z']],
-                    axis=-1)
+                r = np.asarray(data['r'])
+                u = np.asarray(data['u'])
                 E = data['E']
 
                 space_bin = _mesh_bin_indices(space_lib_mesh, r)
