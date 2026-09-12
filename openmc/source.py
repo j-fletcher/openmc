@@ -234,7 +234,7 @@ class SourceBase(ABC):
     def write_source_mesh(
         self,
         space_mesh: openmc.MeshBase,
-        angle_mesh: openmc.MeshBase | None,
+        angle_mesh: openmc.UnitSpherePointset | None,
         energy_bins: Sequence[float],
         min_samples: int = 10_000,
         min_avg_samples_per_voxel: float = 30.0,
@@ -324,7 +324,7 @@ class SourceBase(ABC):
         # openmc.lib after init; the tally itself is never actually scored.
         filters = [openmc.MeshFilter(space_mesh)]
         if angle_mesh is not None:
-            filters.append(openmc.MeshFilter(angle_mesh))
+            filters.append(openmc.MeshAngularFilter(angle_mesh))
         dummy_tally = openmc.Tally()
         dummy_tally.filters = filters
         dummy_tally.scores = ['flux']
