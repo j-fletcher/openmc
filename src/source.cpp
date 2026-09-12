@@ -28,6 +28,7 @@
 #include "openmc/math_functions.h"
 #include "openmc/mcpl_interface.h"
 #include "openmc/memory.h"
+#include "openmc/mesh.h"
 #include "openmc/message_passing.h"
 #include "openmc/mgxs_interface.h"
 #include "openmc/nuclide.h"
@@ -108,6 +109,8 @@ unique_ptr<Source> Source::create(pugi::xml_node node)
       return make_unique<MeshSource>(node);
     } else if (source_type == "tokamak") {
       return make_unique<TokamakSource>(node);
+    } else if (source_type == "correlated") {
+      return make_unique<CorrelatedSource>(node);
     } else {
       fatal_error(fmt::format("Invalid source type '{}' found.", source_type));
     }
@@ -700,6 +703,124 @@ SourceSite MeshSource::sample(uint64_t* seed) const
   // Sample the distribution for the specific mesh element; note that the
   // spatial distribution has been set for each element using MeshElementSpatial
   return source(element)->sample_with_constraints(seed);
+}
+
+//==============================================================================
+// CorrelatedSource implementation
+//==============================================================================
+
+CorrelatedSource::CorrelatedSource(pugi::xml_node node) : Source(node)
+{
+  // Note: Source(node) reads strength/constraints from XML for consistency
+  // with other source types, but neither is actually used at sample time --
+  // strength() is overridden to derive strength from the voxel data, and
+  // constraints_applied() == true means domain/energy/time constraints are
+  // never re-checked (the imported voxel probabilities are assumed to reflect
+  // only phase space actually populated by the original source).
+  int32_t mesh_id = std::stoi(get_node_value(node, "mesh"));
+  if (model::mesh_map.count(mesh_id) == 0) {
+    fatal_error(fmt::format(
+      "Spatial mesh {} referenced by a CorrelatedSource does not exist.",
+      mesh_id));
+  }
+  spatial_mesh_idx_ = model::mesh_map.at(mesh_id);
+
+  if (check_for_node(node, "angle_mesh")) {
+    int32_t angle_mesh_id = std::stoi(get_node_value(node, "angle_mesh"));
+    if (model::mesh_map.count(angle_mesh_id) == 0) {
+      fatal_error(
+        fmt::format("Angular mesh {} referenced by a CorrelatedSource does "
+                    "not exist.",
+          angle_mesh_id));
+    }
+    int32_t angle_mesh_idx = model::mesh_map.at(angle_mesh_id);
+    auto* angle_mesh_ptr = dynamic_cast<UnitSphereTriangularMesh*>(
+      model::meshes[angle_mesh_idx].get());
+    if (!angle_mesh_ptr) {
+      fatal_error(
+        fmt::format("Angular mesh {} referenced by a CorrelatedSource is not "
+                    "a UnitSphereTriangularMesh instance.",
+          angle_mesh_id));
+    }
+    angle_mesh_idx_ = angle_mesh_idx;
+  } else {
+    angle_mesh_idx_ = C_NONE;
+  }
+
+  if (check_for_node(node, "energy_bounds")) {
+    group_bounds_ = get_node_array<double>(node, "energy_bounds");
+  }
+
+  spatial_bins_ = model::meshes[spatial_mesh_idx_]->n_bins();
+  angle_bins_ =
+    angle_mesh_idx_ == C_NONE ? 1 : model::meshes[angle_mesh_idx_]->n_bins();
+  energy_bins_ = group_bounds_.empty() ? 1 : group_bounds_.size() - 1;
+
+  size_t n_voxels =
+    static_cast<size_t>(spatial_bins_ * angle_bins_ * energy_bins_);
+
+  // "strengths" flattened in row-major (spatial, angle, energy) order
+  vector<double> strengths = get_node_array<double>(node, "strengths");
+  if (strengths.size() != n_voxels) {
+    fatal_error(fmt::format(
+      "Number of entries in the 'strengths' array for a CorrelatedSource "
+      "({}) does not match the number of (spatial, angle, energy) voxels "
+      "implied by its mesh(es) and energy bounds ({}).",
+      strengths.size(), n_voxels));
+  }
+
+  weights_ = get_node_array<double>(node, "weights");
+  if (weights_.size() != n_voxels) {
+    fatal_error(fmt::format(
+      "Number of entries in the 'weights' array for a CorrelatedSource "
+      "({}) does not match the number of (spatial, angle, energy) voxels "
+      "implied by its mesh(es) and energy bounds ({}).",
+      weights_.size(), n_voxels));
+  }
+
+  voxel_dist_.assign(strengths);
+
+  if (check_for_node(node, "particle")) {
+    auto tmp_str = get_node_value(node, "particle", false, true);
+    particle_ = ParticleType {tmp_str};
+  }
+  validate_particle_type(particle_, "CorrelatedSource");
+}
+
+SourceSite CorrelatedSource::sample(uint64_t* seed) const
+{
+  SourceSite site {};
+  site.particle = particle_;
+
+  // Select a phase-space voxel (m, a, g)
+  size_t flat = voxel_dist_.sample(seed);
+  int64_t g = static_cast<int64_t>(flat % energy_bins_);
+  int64_t a = static_cast<int64_t>((flat / energy_bins_) % angle_bins_);
+  int64_t m = static_cast<int64_t>(flat / (energy_bins_ * angle_bins_));
+
+  // Sample a position uniformly within the selected spatial mesh element
+  site.r = model::meshes[spatial_mesh_idx_]->sample_element(
+    static_cast<int32_t>(m), seed);
+
+  // Sample a direction within the selected angular mesh element, or
+  // isotropic if no angular dependence
+  if (angle_mesh_idx_ != C_NONE) {
+    site.u = model::meshes[angle_mesh_idx_]->sample_element(
+      static_cast<int32_t>(a), seed);
+  } else {
+    site.u = isotropic_direction(seed);
+  }
+
+  // Energy is sampled from the selected group uniformly in lethargy
+  if (!group_bounds_.empty()) {
+    double e_lo = group_bounds_[g];
+    double e_hi = group_bounds_[g + 1];
+    site.E = e_lo * std::pow(e_hi / e_lo, prn(seed));
+  }
+
+  site.wgt = weights_[flat];
+
+  return site;
 }
 
 //==============================================================================

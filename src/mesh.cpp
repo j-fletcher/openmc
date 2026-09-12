@@ -2627,7 +2627,8 @@ void UnitSphereTriangularMesh::to_hdf5_inner(hid_t mesh_group) const
   write_dataset(mesh_group, "areas", areas_);
 }
 
-Direction UnitSphereTriangularMesh::sample_element(int32_t bin, uint64_t* seed) const
+Direction UnitSphereTriangularMesh::sample_element(
+  int32_t bin, uint64_t* seed) const
 {
   int offset = 9 * bin;
 
@@ -2806,6 +2807,18 @@ extern "C" int openmc_add_unstructured_mesh(
   model::meshes.back()->set_id(-1);
   *id = model::meshes.back()->id_;
 
+  return 0;
+}
+
+extern "C" int openmc_mesh_get_bin(
+  int32_t index, const double xyz[3], int32_t* bin)
+{
+  if (index < 0 || index >= model::meshes.size()) {
+    set_errmsg("Index in meshes array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+  Position r {xyz[0], xyz[1], xyz[2]};
+  *bin = model::meshes[index]->get_bin(r);
   return 0;
 }
 

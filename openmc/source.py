@@ -17,11 +17,33 @@ from openmc.checkvalue import PathLike
 from openmc.stats.multivariate import UnitSphere, Spatial
 from openmc.stats.univariate import Univariate
 from ._xml import get_elem_list, get_text
-from .mesh import MeshBase, StructuredMesh, UnstructuredMesh
+from .mesh import MeshBase, StructuredMesh, UnstructuredMesh, UnitSpherePointset, triangularize_unit_sphere_mesh
 from .particle_type import ParticleType
 from .statepoint import _VERSION_STATEPOINT
 from .utility_funcs import input_path
 
+
+def _mesh_bin_indices(lib_mesh, points: np.ndarray) -> np.ndarray:
+    """Return the flattened mesh bin index containing each point, or -1 for
+    points outside the mesh.
+
+    Parameters
+    ----------
+    lib_mesh
+        An ``openmc.lib`` mesh object (e.g. ``openmc.lib.meshes[mesh_id]``)
+    points : numpy.ndarray
+        Array of shape (N, 3) giving Cartesian points to look up
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape (N,) giving the bin index of each point, or -1 if
+        the point is outside the mesh
+    """
+    bins = np.empty(len(points), dtype=int)
+    for i, p in enumerate(points):
+        bins[i] = lib_mesh.get_bin(p)
+    return bins
 
 class SourceBase(ABC):
     """Base class for external sources
@@ -208,6 +230,188 @@ class SourceBase(ABC):
             else:
                 raise ValueError(
                     f'Source type {source_type} is not recognized')
+            
+    def write_source_mesh(
+        self,
+        space_mesh: openmc.MeshBase,
+        angle_mesh: openmc.UnitSpherePointset | None,
+        energy_bins: Sequence[float],
+        min_samples: int = 10_000,
+        min_avg_samples_per_voxel: float = 30.0,
+        max_samples: int | None = None,
+        filename: PathLike = 'forward_source_mesh.h5',
+        region_size: float = 1.0e5,
+        **init_kwargs,
+    ) -> None:
+        """Precompute this source's strength on a (space, angle, energy) grid 
+        and write it to an HDF5 file for FW-CADIS source biasing.
+
+        This is meant to accommodate biasing sources that aren't 
+        :class:`IndependentSource` instances, under the assumption that a 
+        geometrically simpler "lookalike" :class:`IndependentSource` is used 
+        in the Random Ray solve to estimate adjoint flux data.
+
+        Parameters
+        ----------
+        space_mesh : openmc.MeshBase
+            Spatial mesh to bin sampled source positions into. Should match
+            the mesh that will be used for the corresponding random ray
+            source-biasing tally.
+        angle_mesh : openmc.MeshBase or None
+            Angular mesh (over the unit sphere) to bin sampled source
+            directions into. If None, emission is recorded as a single
+            (isotropic) angle bin.
+        energy_bins : sequence of float
+            Ascending energy group boundaries in [eV], matching the group
+            structure used for the corresponding random ray source-biasing
+            tally.
+        min_samples : int
+            Number of source sites to sample.
+        min_avg_samples_per_voxel : float
+            Target average number of samples per occupied (spatial, angle,
+            energy) voxel.
+        max_samples : int or None
+            Maximum total number of source sites sampled. Issues a warning  
+            if this cap is reached before min_avg_samples_per_voxel is
+            satisfied. Defaults to ``10 * min_samples``.
+        filename : path-like
+            Path to write the resulting HDF5 file to.
+        region_size : float
+            Half-width in [cm] of the placeholder void region this source is
+            sampled within. Must be large enough to contain the full
+            spatial extent of both this source and space_mesh -- increase
+            this if source sites are unexpectedly missing from the result.
+        **init_kwargs
+            Keyword arguments passed to :func:`openmc.lib.init` (via
+            :class:`openmc.lib.TemporarySession`)
+
+        See Also
+        --------
+        openmc.Model.sample_external_source
+        """
+        import openmc.lib
+
+        min_samples = int(min_samples)
+        if max_samples is None:
+            max_samples = 10 * min_samples
+        if max_samples < min_samples:
+            raise ValueError(
+                f'max_samples ({max_samples}) must be >= min_samples '
+                f'({min_samples}).')
+
+        energy_bins = np.asarray(energy_bins, dtype=float)
+        if energy_bins.ndim != 1 or energy_bins.size < 2:
+            raise ValueError(
+                'energy_bins must be a 1-D sequence with at least two '
+                'entries.')
+        n_energy = energy_bins.size - 1
+
+        n_space = space_mesh.n_elements
+        n_angle = angle_mesh.n_elements if angle_mesh is not None else 1
+
+        # Build a minimal model containing only this source
+        half = region_size
+        box = openmc.model.RectangularParallelepiped(
+            -half, half, -half, half, -half, half, boundary_type='vacuum')
+        placeholder_cell = openmc.Cell(region=-box)
+        placeholder_universe = openmc.Universe(cells=[placeholder_cell])
+
+        model = openmc.Model()
+        model.geometry.root_universe = placeholder_universe
+        model.settings.run_mode = 'fixed source'
+        model.settings.source = [self]
+
+        # Attach the meshes to a tally so they are available through 
+        # openmc.lib after init; the tally itself is never actually scored.
+        filters = [openmc.MeshFilter(space_mesh)]
+        if angle_mesh is not None:
+            filters.append(openmc.MeshAngularFilter(angle_mesh))
+        dummy_tally = openmc.Tally()
+        dummy_tally.filters = filters
+        dummy_tally.scores = ['flux']
+        model.tallies = openmc.Tallies([dummy_tally])
+
+        init_kwargs.setdefault('output', False)
+        init_kwargs.setdefault('args', ['-c'])
+
+        counts = np.zeros((n_space, n_angle, n_energy))
+        n_drawn = 0
+        avg_per_voxel = 0.0
+
+        with openmc.lib.TemporarySession(model, **init_kwargs):
+            space_lib_mesh = openmc.lib.meshes[space_mesh.id]
+            angle_lib_mesh = (
+                openmc.lib.meshes[angle_mesh.id]
+                if angle_mesh is not None else None
+            )
+
+            while True:
+                batch_size = min(min_samples, max_samples - n_drawn)
+                if batch_size <= 0:
+                    break
+
+                data = openmc.lib.sample_external_source(
+                    n_samples=batch_size, as_array=True)
+                n_drawn += batch_size
+
+                r = np.asarray(data['r'])
+                u = np.asarray(data['u'])
+                E = data['E']
+
+                space_bin = _mesh_bin_indices(space_lib_mesh, r)
+                valid = space_bin >= 0
+
+                if angle_lib_mesh is not None:
+                    angle_bin = _mesh_bin_indices(angle_lib_mesh, u)
+                    valid &= angle_bin >= 0
+                else:
+                    angle_bin = np.zeros(len(r), dtype=int)
+
+                energy_bin = np.digitize(E, energy_bins) - 1
+                valid &= (energy_bin >= 0) & (energy_bin < n_energy)
+
+                np.add.at(
+                    counts,
+                    (space_bin[valid], angle_bin[valid], energy_bin[valid]),
+                    1.0)
+
+                # Average samples per voxel among voxels sampled at least
+                # once so far. counts.sum() equals the sum over just the
+                # occupied voxels, since unoccupied ones are still zero.
+                n_occupied = np.count_nonzero(counts > 0)
+                avg_per_voxel = (
+                    counts.sum() / n_occupied if n_occupied else 0.0)
+
+                if avg_per_voxel >= min_avg_samples_per_voxel:
+                    break
+                if n_drawn >= max_samples:
+                    break
+
+        if avg_per_voxel < min_avg_samples_per_voxel:
+            warnings.warn(
+                f"write_source_mesh reached max_samples ({max_samples}) "
+                f"with an average of only {avg_per_voxel:.1f} samples per "
+                f"occupied voxel (wanted {min_avg_samples_per_voxel}). "
+                "Consider raising max_samples or coarsening "
+                "space_mesh/angle_mesh/energy_bins."
+            )
+
+        # Normalize by the total number of samples drawn, including rejected 
+        # sites, so that source support falling outside 
+        # space_mesh/angle_mesh/energy_bins correctly shows up as
+        # unrepresented probability mass rather than being renormalized away
+        S = counts / n_drawn
+
+        with h5py.File(filename, 'w') as fh:
+            fh.attrs['filetype'] = np.bytes_('forward_source')
+            fh.attrs['version'] = np.array([1, 0])
+            fh.create_dataset('spatial_mesh', data=space_mesh.id)
+            # -1 used for angle-independent biasing
+            fh.create_dataset(
+                'angle_mesh',
+                data=angle_mesh.id if angle_mesh is not None else -1)
+            fh.create_dataset('energy_bounds', data=energy_bins)
+            fh.create_dataset('unbiased_source_strength', data=S)
 
     @staticmethod
     def _get_constraints(elem: ET.Element) -> dict[str, Any]:
@@ -658,6 +862,256 @@ class MeshSource(SourceBase):
             e) for e in elem.iterchildren('source')]
         constraints = cls._get_constraints(elem)
         return cls(mesh, sources, constraints=constraints)
+    
+class CorrelatedSource(SourceBase):
+    """A source that samples a precomputed, spatially- and (optionally)
+    angularly-biased phase-space distribution.
+
+    This is normally constructed from a "source_bias.h5" file produced by
+    FW-CADIS source biasing (see the C++ ``SourceBias`` class in
+    ``openmc/weight_windows.h`` and ``openmc_weight_windows_export``),
+    which stores a biased source strength B(r, Omega, g) and a per-voxel
+    weight 1/flux(r, Omega, g) on a (spatial mesh, angular mesh, energy
+    group) grid. If the angular mesh is a :class:`UnitSpherePointset` (the
+    only angular mesh type that currently supports point-location, i.e.
+    tallying -- see ``AngularMesh`` in ``mesh.h``), it is converted here to
+    a :class:`UnitSphereTriangularMesh` (which instead supports direction
+    sampling) via a star triangulation of its spherical Voronoi diagram,
+    using :func:`scipy.spatial.SphericalVoronoi` (see
+    :func:`triangularize_unit_sphere_mesh`). This conversion happens once,
+    in Python, at construction time; the fully-processed result -- the
+    (possibly larger, after triangulation) biased strength and weight
+    arrays, plus mesh references -- is written directly to XML, so the C++
+    side never reads source_bias.h5 or performs any triangulation itself
+    (see ``CorrelatedSource`` in ``openmc/source.h``/``source.cpp``).
+
+    B is treated as *extensive* (a probability mass) when redistributed
+    across new triangles, while the weight is treated as *intensive* and
+    simply copied unchanged to every new triangle belonging to its parent
+    point -- subdividing the angular bin for sampling purposes shouldn't
+    dilute a purely directional correction factor.
+
+    .. versionadded:: TODO
+
+    Parameters
+    ----------
+    filename : path-like
+        Path to a "source_bias.h5" file.
+    constraints : dict
+        Constraints on sampled source particles; see :class:`SourceBase`.
+
+    Attributes
+    ----------
+    mesh : openmc.MeshBase
+        Spatial mesh source positions are sampled from.
+    angle_mesh : openmc.MeshBase or None
+        Angular mesh source directions are sampled from (a
+        UnitSphereTriangularMesh if the source was angularly biased), or
+        None if emission is isotropic.
+    energy_bounds : numpy.ndarray or None
+        Energy group boundaries [eV], or None if there is a single group.
+    strengths : numpy.ndarray
+        Biased source strength B(r, Omega, g), flattened in row-major
+        (spatial, angle, energy) order.
+    weights : numpy.ndarray
+        Per-voxel weight (1 / flux), in the same order as `strengths`.
+    strength : float
+        Total source strength (sum of `strengths`).
+    type : str
+        Indicator of source type: 'dependent'
+
+    """
+
+    def __init__(
+        self,
+        filename: PathLike,
+        constraints: dict[str, Any] | None = None,
+    ):
+        super().__init__(strength=None, constraints=constraints)
+        self._load(filename)
+
+    @property
+    def type(self) -> str:
+        return "dependent"
+
+    @property
+    def mesh(self) -> MeshBase:
+        return self._mesh
+
+    @property
+    def angle_mesh(self) -> MeshBase | None:
+        return self._angle_mesh
+
+    @property
+    def energy_bounds(self) -> np.ndarray | None:
+        return self._energy_bounds
+
+    @property
+    def strengths(self) -> np.ndarray:
+        return self._strengths
+
+    @property
+    def weights(self) -> np.ndarray:
+        return self._weights
+
+    @property
+    def strength(self) -> float:
+        return float(np.sum(self._strengths))
+
+    @strength.setter
+    def strength(self, val):
+        if val is not None:
+            cv.check_type('dependent source strength', val, Real)
+            current = self.strength if self.strength != 0.0 else 1.0
+            self._strengths = self._strengths * (val / current)
+
+    def _load(self, filename: PathLike):
+        """Read source_bias.h5, triangulating the angular mesh (if present
+        and if it is a UnitSpherePointset) in the process.
+
+        The HDF5 layout read here (dataset names/shapes, the "-1" sentinel
+        for "no angular mesh", and mesh subgroups named "mesh <id>") mirrors
+        ``SourceBias::to_hdf5()`` on the C++ side (see ``weight_windows.cpp``)
+        and ``Mesh::to_hdf5()`` in ``mesh.cpp``.
+        """
+        filename = Path(filename)
+
+        with h5py.File(filename, 'r') as fh:
+            filetype = fh.attrs['filetype']
+            if isinstance(filetype, bytes):
+                filetype = filetype.decode()
+            if filetype != 'source_bias':
+                raise ValueError(
+                    f"File '{filename}' is not a source bias file "
+                    f"(filetype='{filetype}').")
+
+            sb_names = [k for k in fh.keys() if k.startswith('source_bias_')]
+            if len(sb_names) != 1:
+                raise ValueError(
+                    f"File '{filename}' contains {len(sb_names)} source "
+                    "bias groups; CorrelatedSource currently requires "
+                    "exactly one.")
+            sb_group = fh[sb_names[0]]
+
+            mesh_group = fh['meshes']
+
+            spatial_mesh_id = int(np.asarray(sb_group['spatial_mesh']))
+            angle_mesh_id = int(np.asarray(sb_group['angle_mesh']))
+
+            # Mesh subgroups are named "mesh <id>" (matching the C++
+            # Mesh::to_hdf5() convention) -- MeshBase.from_hdf5() parses the
+            # ID directly out of the group's own name, so the lookup key
+            # must match that exactly.
+            spatial_mesh = MeshBase.from_hdf5(
+                mesh_group[f'mesh {spatial_mesh_id}'])
+
+            energy_bounds = np.asarray(sb_group['energy_bounds'])
+            n_energy = max(len(energy_bounds) - 1, 1)
+            n_space = spatial_mesh.n_elements
+
+            biased_strength = np.asarray(sb_group['biased_source_strength'])
+            weights = np.asarray(sb_group['weights'])
+            # Expected shape: (n_space, n_angle, n_energy)
+            n_angle = biased_strength.shape[1]
+
+            if angle_mesh_id != -1:
+                angle_mesh = MeshBase.from_hdf5(
+                    mesh_group[f'mesh {angle_mesh_id}'])
+            else:
+                angle_mesh = None
+
+        if angle_mesh is not None and isinstance(angle_mesh, UnitSpherePointset):
+            # triangularize_unit_sphere_mesh expects point-major data, with
+            # the angle/point dimension leading; reshape from our (spatial,
+            # angle, energy) layout accordingly, treating (spatial, energy)
+            # as one flattened "extra" block per point.
+            b_point_major = np.moveaxis(biased_strength, 1, 0).reshape(
+                n_angle, n_space * n_energy)
+            w_point_major = np.moveaxis(weights, 1, 0).reshape(
+                n_angle, n_space * n_energy)
+
+            angle_mesh, new_b, new_w = triangularize_unit_sphere_mesh(
+                angle_mesh, data=b_point_major, broadcast_data=w_point_major)
+
+            n_angle = angle_mesh.n_elements
+            biased_strength = np.moveaxis(
+                new_b.reshape(n_angle, n_space, n_energy), 0, 1)
+            weights = np.moveaxis(
+                new_w.reshape(n_angle, n_space, n_energy), 0, 1)
+
+        self._mesh = spatial_mesh
+        self._angle_mesh = angle_mesh
+        self._energy_bounds = energy_bounds if len(energy_bounds) > 0 else None
+        # Flatten to row-major (spatial, angle, energy) order, matching what
+        # CorrelatedSource's C++ constructor expects to find in "strengths"/
+        # "weights".
+        self._strengths = biased_strength.ravel()
+        self._weights = weights.ravel()
+
+    def populate_xml_element(self, elem: ET.Element):
+        """Add necessary source information to an XML element
+
+        Returns
+        -------
+        element : lxml.etree._Element
+            XML element containing source data
+
+        """
+        elem.set("mesh", str(self.mesh.id))
+        if self.angle_mesh is not None:
+            elem.set("angle_mesh", str(self.angle_mesh.id))
+        if self.energy_bounds is not None:
+            subelem = ET.SubElement(elem, "energy_bounds")
+            subelem.text = ' '.join(str(e) for e in self.energy_bounds)
+        subelem = ET.SubElement(elem, "strengths")
+        subelem.text = ' '.join(str(s) for s in self.strengths)
+        subelem = ET.SubElement(elem, "weights")
+        subelem.text = ' '.join(str(w) for w in self.weights)
+
+    @classmethod
+    def from_xml_element(cls, elem: ET.Element, meshes) -> CorrelatedSource:
+        """
+        Generate CorrelatedSource from an XML element
+
+        Parameters
+        ----------
+        elem : lxml.etree._Element
+            XML element
+        meshes : dict
+            A dictionary with mesh IDs as keys and openmc.MeshBase instances
+            as values
+
+        Returns
+        -------
+        openmc.CorrelatedSource
+            CorrelatedSource generated from the XML element
+
+        """
+        # Bypass __init__ (which reads directly from an HDF5 file) since
+        # everything needed is already present in the XML -- source_bias.h5
+        # itself does not need to exist at this point.
+        source = cls.__new__(cls)
+        SourceBase.__init__(
+            source, strength=None, constraints=cls._get_constraints(elem))
+
+        mesh_id = int(get_text(elem, 'mesh'))
+        source._mesh = meshes[mesh_id]
+
+        angle_mesh_id = get_text(elem, 'angle_mesh')
+        source._angle_mesh = (
+            meshes[int(angle_mesh_id)] if angle_mesh_id is not None else None)
+
+        energy_bounds_text = get_text(elem, 'energy_bounds')
+        source._energy_bounds = (
+            np.array([float(x) for x in energy_bounds_text.split()])
+            if energy_bounds_text is not None else None)
+
+        source._strengths = np.array(
+            [float(x) for x in get_text(elem, 'strengths').split()])
+        source._weights = np.array(
+            [float(x) for x in get_text(elem, 'weights').split()])
+
+        return source
 
 
 def Source(*args, **kwargs):
