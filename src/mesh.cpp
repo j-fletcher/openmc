@@ -2567,7 +2567,7 @@ UnitSphereTriangularMesh::UnitSphereTriangularMesh(pugi::xml_node node)
   }
 
   areas_ = get_node_array<double>(node, "areas");
-  if (areas_.size() != vertices_.size() % 9) {
+  if (areas_.size() != vertices_.size() / 9) {
     fatal_error(fmt::format("Area array for triangular unit sphere mesh {} "
                             "contains the wrong number of elements.",
       id_));

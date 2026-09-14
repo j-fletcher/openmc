@@ -1577,6 +1577,12 @@ class Settings:
                     root.append(source.mesh.to_xml_element())
                     if mesh_memo is not None:
                         mesh_memo.add(source.mesh.id)
+            if isinstance(source, CorrelatedSource) and source.angle_mesh is not None:
+                path = f"./mesh[@id='{source.angle_mesh.id}']"
+                if root.find(path) is None:
+                    root.append(source.angle_mesh.to_xml_element())
+                    if mesh_memo is not None:
+                        mesh_memo.add(source.angle_mesh.id)
 
     def _create_volume_calcs_subelement(self, root):
         for calc in self.volume_calculations:
