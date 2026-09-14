@@ -918,7 +918,7 @@ class CorrelatedSource(SourceBase):
     strength : float
         Total source strength (sum of `strengths`).
     type : str
-        Indicator of source type: 'dependent'
+        Indicator of source type: 'correlated'
 
     """
 
@@ -932,7 +932,7 @@ class CorrelatedSource(SourceBase):
 
     @property
     def type(self) -> str:
-        return "dependent"
+        return "correlated"
 
     @property
     def mesh(self) -> MeshBase:
@@ -961,7 +961,7 @@ class CorrelatedSource(SourceBase):
     @strength.setter
     def strength(self, val):
         if val is not None:
-            cv.check_type('dependent source strength', val, Real)
+            cv.check_type('correlated source strength', val, Real)
             current = self.strength if self.strength != 0.0 else 1.0
             self._strengths = self._strengths * (val / current)
 
