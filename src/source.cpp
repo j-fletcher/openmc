@@ -747,8 +747,8 @@ CorrelatedSource::CorrelatedSource(pugi::xml_node node) : Source(node)
     angle_mesh_idx_ = C_NONE;
   }
 
-  if (check_for_node(node, "energy_bounds")) {
-    group_bounds_ = get_node_array<double>(node, "energy_bounds");
+  if (check_for_node(node, "group_bounds")) {
+    group_bounds_ = get_node_array<double>(node, "group_bounds");
   }
 
   spatial_bins_ = model::meshes[spatial_mesh_idx_]->n_bins();

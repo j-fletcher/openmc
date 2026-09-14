@@ -1061,7 +1061,7 @@ class CorrelatedSource(SourceBase):
         if self.angle_mesh is not None:
             elem.set("angle_mesh", str(self.angle_mesh.id))
         if self.energy_bounds is not None:
-            subelem = ET.SubElement(elem, "energy_bounds")
+            subelem = ET.SubElement(elem, "group_bounds")
             subelem.text = ' '.join(str(e) for e in self.energy_bounds)
         subelem = ET.SubElement(elem, "strengths")
         subelem.text = ' '.join(str(s) for s in self.strengths)
@@ -1101,7 +1101,7 @@ class CorrelatedSource(SourceBase):
         source._angle_mesh = (
             meshes[int(angle_mesh_id)] if angle_mesh_id is not None else None)
 
-        energy_bounds_text = get_text(elem, 'energy_bounds')
+        energy_bounds_text = get_text(elem, 'group_bounds')
         source._energy_bounds = (
             np.array([float(x) for x in energy_bounds_text.split()])
             if energy_bounds_text is not None else None)
