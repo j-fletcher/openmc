@@ -3939,16 +3939,26 @@ def triangularize_unit_sphere_mesh(mesh, data=None, broadcast_data=None):
         verts = sv.vertices[region]
 
         n = len(verts)
-        areas = np.empty(n)
 
-        # Compute area of each spherical triangle
-        for i in range(n):
-            v1 = verts[i]
-            v2 = verts[(i + 1) % n]
+        def _fan_areas(verts):
+            areas = np.empty(n)
+            for i in range(n):
+                v1 = verts[i]
+                v2 = verts[(i + 1) % n]
+                num = np.dot(pole, np.cross(v1, v2))
+                denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
+                areas[i] = 2 * np.arctan2(num, denom)
+            return areas
 
-            num = np.dot(pole, np.cross(v1, v2))
-            denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
-            areas[i] = 2 * np.arctan2(num, denom)
+        areas = _fan_areas(verts)
+        # SphericalVoronoi.sort_vertices_of_regions() does not guarantee a
+        # globally consistent winding order across all regions. If our function 
+        # returns a negative area, reverse the order of the non-pole vertices 
+        # to correct it.
+
+        if areas.sum() < 0:
+            verts = verts[::-1]
+            areas = _fan_areas(verts)
 
         total_area = areas.sum()
 
