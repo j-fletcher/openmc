@@ -3937,10 +3937,50 @@ def triangularize_unit_sphere_mesh(mesh, data=None, broadcast_data=None):
 
         pole = mesh.points[pole_index]
         verts = sv.vertices[region]
+        _, unique_idx = np.unique(np.round(verts, decimals=10), axis=0,
+                                   return_index=True)
+        verts = verts[np.sort(unique_idx)]
 
         n = len(verts)
 
-        def _fan_areas(verts):
+        ref = verts[0] - np.dot(pole, verts[0]) * pole
+        ref_norm = np.linalg.norm(ref)
+        if ref_norm < 1e-10:
+            # verts[0] happens to be (nearly) parallel to pole; fall back
+            # to a different, guaranteed non-parallel reference vector
+            fallback = (np.array([1.0, 0.0, 0.0]) if abs(pole[0]) < 0.9
+                        else np.array([0.0, 1.0, 0.0]))
+            ref = fallback - np.dot(pole, fallback) * pole
+            ref_norm = np.linalg.norm(ref)
+        ref /= ref_norm
+
+        angles = np.empty(n)
+        for i in range(n):
+            v = verts[i] - np.dot(pole, verts[i]) * pole
+            v_norm = np.linalg.norm(v)
+            if v_norm > 1e-10:
+                v = v / v_norm
+            cos_a = np.clip(np.dot(ref, v), -1.0, 1.0)
+            sin_a = np.dot(pole, np.cross(ref, v))
+            angles[i] = np.arctan2(sin_a, cos_a)
+
+        verts = verts[np.argsort(angles)]
+
+        areas = np.empty(n)
+        for i in range(n):
+            v1 = verts[i]
+            v2 = verts[(i + 1) % n]
+            num = np.dot(pole, np.cross(v1, v2))
+            denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
+            areas[i] = 2 * np.arctan2(num, denom)
+
+        # The sort above guarantees a *consistent* winding (all triangles
+        # in the fan will agree in sign with each other), but not which
+        # overall rotational sense (CW vs CCW) that is -- it depends on an
+        # arbitrary choice baked into the ref/pole/v triple product above.
+        # Check once per region and flip if needed.
+        if areas.sum() < 0:
+            verts = verts[::-1]
             areas = np.empty(n)
             for i in range(n):
                 v1 = verts[i]
@@ -3948,17 +3988,6 @@ def triangularize_unit_sphere_mesh(mesh, data=None, broadcast_data=None):
                 num = np.dot(pole, np.cross(v1, v2))
                 denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
                 areas[i] = 2 * np.arctan2(num, denom)
-            return areas
-
-        areas = _fan_areas(verts)
-        # SphericalVoronoi.sort_vertices_of_regions() does not guarantee a
-        # globally consistent winding order across all regions. If our function 
-        # returns a negative area, reverse the order of the non-pole vertices 
-        # to correct it.
-
-        if areas.sum() < 0:
-            verts = verts[::-1]
-            areas = _fan_areas(verts)
 
         total_area = areas.sum()
 

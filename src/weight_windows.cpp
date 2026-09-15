@@ -839,6 +839,9 @@ void SourceBias::update(const Tally* tally)
           flat += a * filt_stride[pos_angle];
 
         flux_(m, a, e) = n > 0 ? results(flat, score_index, i_sum) / n : 0.0;
+
+        double raw_sum = results(flat, score_index, i_sum);
+        flux_(m, a, e) = (n > 0 && raw_sum > 0.0) ? raw_sum / n : 0.0;
       }
     }
   }
@@ -864,17 +867,30 @@ void SourceBias::to_hdf5(hid_t group) const
   tensor::Tensor<double> weights({static_cast<size_t>(spatial_bins),
     static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
 
+  double total_B = 0.0;
+  double total_S = 0.0;
+
   for (int64_t m = 0; m < spatial_bins; ++m) {
     for (int64_t a = 0; a < angle_bins; ++a) {
       for (int64_t e = 0; e < energy_bins; ++e) {
         double psi = flux_(m, a, e);
-        biased_strength(m, a, e) = psi * unbiased_strength_(m, a, e);
-        // A weight is only meaningful where the biased distribution can
-        // actually place a particle (psi > 0, so B could be nonzero there).
-        // Elsewhere B is guaranteed to be 0 too (since B = psi * S), so a
-        // Discrete distribution built from B will never select that voxel
-        // and this placeholder value is never used.
-        weights(m, a, e) = psi > 0.0 ? 1.0 / psi : 0.0;
+        double b = psi * unbiased_strength_(m, a, e);
+
+        biased_strength(m, a, e) = b;
+        total_B += b;
+        total_S += unbiased_strength_(m, a, e);
+      }
+    }
+  }
+
+  // The correct per-voxel weight is [sum(B)/sum(S)] / flux(voxel)
+  double weight_norm = (total_S > 0.0) ? total_B / total_S : 1.0;
+
+  for (int64_t m = 0; m < spatial_bins; ++m) {
+    for (int64_t a = 0; a < angle_bins; ++a) {
+      for (int64_t e = 0; e < energy_bins; ++e) {
+        double psi = flux_(m, a, e);
+        weights(m, a, e) = psi > 0.0 ? weight_norm / psi : 0.0;
       }
     }
   }
