@@ -10,7 +10,7 @@ import numpy as np
 import h5py
 
 import openmc
-from openmc.mesh import MeshBase, RectilinearMesh, CylindricalMesh, SphericalMesh, UnstructuredMesh
+from openmc.mesh import MeshBase, RectilinearMesh, CylindricalMesh, SphericalMesh, UnstructuredMesh, UnitSpherePointset
 from openmc.tallies import Tallies
 import openmc.checkvalue as cv
 from openmc.checkvalue import PathLike
@@ -502,6 +502,11 @@ class WeightWindowGenerator:
         The weight window generation methodology applied during an update.
     targets : :class:`openmc.Tallies` or iterable of int
         Target tallies for local variance reduction via FW-CADIS.
+    source_biasing : bool
+        Whether to perform automated biasing of fixed sources via FW-CADIS.
+    angular_biasing_quadrature : :class:`openmc.UnitSpherePointset`, optional
+        Optional set of angles to generate source biasing parameters on. 
+        Defaults to None for biasing as a function of space and energy only.
     max_realizations : int
         The upper limit for number of tally realizations when generating weight
         windows.
@@ -523,6 +528,11 @@ class WeightWindowGenerator:
         The weight window generation methodology applied during an update.
     targets : :class:`openmc.Tallies` or numpy.ndarray
         Target tallies for local variance reduction via FW-CADIS.
+    source_biasing : bool
+        Whether to perform automated biasing of fixed sources via FW-CADIS.
+    angular_biasing_quadrature : openmc.UnitSpherePointset or None
+        Optional set of angles to generate source biasing parameters on. 
+        Defaults to None for biasing as a function of space and energy only.
     max_realizations : int
         The upper limit for number of tally realizations when generating weight
         windows.
@@ -543,6 +553,8 @@ class WeightWindowGenerator:
         particle_type: str | int | openmc.ParticleType = 'neutron',
         method: str = 'magic',
         targets: openmc.Tallies | Iterable[int] | None = None,
+        source_biasing: bool = False,
+        angular_biasing_quadrature: openmc.UnitSpherePointset | None = None,
         max_realizations: int = 1,
         update_interval: int = 1,
         on_the_fly: bool = True
@@ -556,6 +568,8 @@ class WeightWindowGenerator:
         self.particle_type = particle_type
         self.method = method
         self.targets = targets
+        self.source_biasing = source_biasing
+        self.angular_biasing_quadrature = angular_biasing_quadrature
         self.max_realizations = max_realizations
         self.update_interval = update_interval
         self.on_the_fly = on_the_fly
@@ -566,6 +580,7 @@ class WeightWindowGenerator:
         string += f'\t{"Particle:":<20}=\t{str(self.particle_type)}\n'
         string += f'\t{"Energy Bounds:":<20}=\t{self.energy_bounds}\n'
         string += f'\t{"Method":<20}=\t{self.method}\n'
+        string += f'\t{"Source Biasing":<20}=\t{self.source_biasing}\n'
         string += f'\t{"Max Realizations:":<20}=\t{self.max_realizations}\n'
         string += f'\t{"Update Interval:":<20}=\t{self.update_interval}\n'
         string += f'\t{"On The Fly:":<20}=\t{self.on_the_fly}\n'
@@ -635,6 +650,66 @@ class WeightWindowGenerator:
                 t = np.asarray(list(t), dtype=int)
             self._targets = t
 
+    @property
+    def source_biasing(self) -> bool:
+        return self._source_biasing
+    
+    @source_biasing.setter
+    def source_biasing(self, sb: bool):
+        cv.check_type('automated source biasing', sb, bool)
+        if sb == True and self.method != 'fw_cadis':
+            raise ValueError(
+                "Automated source biasing is only enabled via the " \
+                "fw_cadis update method.")
+        self._source_biasing = sb
+
+    @property
+    def angular_biasing_quadrature(self) -> openmc.UnitSpherePointset:
+        return self._angular_biasing_quadrature
+
+    @angular_biasing_quadrature.setter
+    def angular_biasing_quadrature(self, angle_mesh):
+        if angle_mesh is None:
+            self._angular_biasing_quadrature = angle_mesh
+        elif self.source_biasing != True:
+            raise ValueError(
+                "Cannot specify an angular biasing quadrature while source " \
+                "biasing is not active.")
+        else:
+            cv.check_type('angular biasing quadrature', angle_mesh, UnitSpherePointset)
+            angles = angle_mesh.points
+            if len(angles) < 8:
+                raise ValueError(
+                    "Angular biasing quadrature requires at least 8 angles (1 in each octant).")
+            
+            # Make sure there is at least one angle in each octant, since Voronoi cells that 
+            # are too large could produce triangles we may not be able to sample from, e.g. 
+            # with antipodal vertices or area >= 2pi. 
+            # scipy.spatial.SphericalVoronoi performs a check that the provided angle set 
+            # spans R3, but requiring one angle in each octant is a stronger condition that 
+            # also prevents clustering points within one hemisphere.
+
+            x_pos = angles[:, 0] >= 0
+            y_pos = angles[:, 1] >= 0
+            z_pos = angles[:, 2] >= 0
+
+            octants = np.zeros(len(angles), dtype=int)
+            octants[ x_pos &  y_pos &  z_pos] = 1
+            octants[~x_pos &  y_pos &  z_pos] = 2
+            octants[~x_pos & ~y_pos &  z_pos] = 3
+            octants[ x_pos & ~y_pos &  z_pos] = 4
+            octants[ x_pos &  y_pos & ~z_pos] = 5
+            octants[~x_pos &  y_pos & ~z_pos] = 6
+            octants[~x_pos & ~y_pos & ~z_pos] = 7
+            octants[ x_pos & ~y_pos & ~z_pos] = 8
+
+            if len(np.unique(octants)) < 8:
+                raise ValueError(
+                    "Angular quadrature provided for source biasing does not have at least one " \
+                    "angle in each octant.")
+            
+            self._angular_biasing_quadrature = angle_mesh
+    
     @property
     def max_realizations(self) -> int:
         return self._max_realizations
@@ -744,6 +819,12 @@ class WeightWindowGenerator:
                 targets_elem = ET.SubElement(element, 'targets')
                 targets_elem.text = ' '.join(str(tally_id) for tally_id in self.targets)
 
+        if self.source_biasing:
+            sb_elem = ET.SubElement(element, 'source_biasing')
+            sb_elem.text = str(self.source_biasing).lower()
+        if self.angular_biasing_quadrature is not None:
+            angle_mesh_elem = ET.SubElement(element, 'angular_biasing_quadrature')
+            angle_mesh_elem.text = str(self.angular_biasing_quadrature.id)
         if self.update_parameters is not None:
             self._update_parameters_subelement(element)
 
@@ -789,6 +870,12 @@ class WeightWindowGenerator:
             else:
                 wwg.targets = get_elem_list(elem, "targets")
 
+        if elem.find('source_biasing') is not None:
+            wwg.source_biasing = bool(get_text(elem, 'source_biasing'))
+        if elem.find('angular_biasing_quadrature') is not None:
+            angle_mesh_id = int(get_text(elem, 'angular_biasing_quadrature'))
+            angle_mesh = meshes[angle_mesh_id]
+            wwg.angular_biasing_quadrature = angle_mesh
         if elem.find('update_parameters') is not None:
             update_parameters = {}
             params_elem = elem.find('update_parameters')
