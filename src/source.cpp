@@ -6,6 +6,7 @@
 
 #include <algorithm> // for max
 #include <cmath>     // for sin, cos, abs
+#include <numeric>   // for accumulate
 #include <utility>   // for move
 
 #ifdef HAS_DYNAMIC_LINKING
@@ -767,6 +768,13 @@ CorrelatedSource::CorrelatedSource(pugi::xml_node node) : Source(node)
       "({}) does not match the number of (spatial, angle, energy) voxels "
       "implied by its mesh(es) and energy bounds ({}).",
       strengths.size(), n_voxels));
+  }
+  double total_strength =
+    std::accumulate(strengths.begin(), strengths.end(), 0.0);
+  if (std::fabs(total_strength - 1.0) > FP_PRECISION) {
+    for (auto& element : strengths) {
+      element /= total_strength;
+    }
   }
 
   weights_ = get_node_array<double>(node, "weights");

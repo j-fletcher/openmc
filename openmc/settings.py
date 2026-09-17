@@ -1981,7 +1981,7 @@ class Settings:
         # ensure that mesh elements are created if needed
         for wwg in self.weight_window_generators:
             for mesh in (wwg.mesh, wwg.angular_biasing_quadrature):
-                if mesh_memo is not None and mesh.id in mesh_memo:
+                if mesh is None or (mesh_memo is not None and mesh.id in mesh_memo):
                     continue
 
                 # See if a <mesh> element already exists -- if not, add it

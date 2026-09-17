@@ -3974,10 +3974,9 @@ def triangularize_unit_sphere_mesh(mesh, data=None, broadcast_data=None):
             denom = 1 + np.dot(pole, v1) + np.dot(v1, v2) + np.dot(v2, pole)
             areas[i] = 2 * np.arctan2(num, denom)
 
-        # The sort above guarantees a *consistent* winding (all triangles
-        # in the fan will agree in sign with each other), but not which
-        # overall rotational sense (CW vs CCW) that is -- it depends on an
-        # arbitrary choice baked into the ref/pole/v triple product above.
+        # The sort above guarantees a consistent winding (all triangles
+        # in the fan will agree in sign with each other), but not the
+        # overall rotational sense of the winding.
         # Check once per region and flip if needed.
         if areas.sum() < 0:
             verts = verts[::-1]

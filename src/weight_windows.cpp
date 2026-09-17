@@ -838,8 +838,6 @@ void SourceBias::update(const Tally* tally)
         if (pos_angle != -1)
           flat += a * filt_stride[pos_angle];
 
-        flux_(m, a, e) = n > 0 ? results(flat, score_index, i_sum) / n : 0.0;
-
         double raw_sum = results(flat, score_index, i_sum);
         flux_(m, a, e) = (n > 0 && raw_sum > 0.0) ? raw_sum / n : 0.0;
       }
@@ -867,30 +865,44 @@ void SourceBias::to_hdf5(hid_t group) const
   tensor::Tensor<double> weights({static_cast<size_t>(spatial_bins),
     static_cast<size_t>(angle_bins), static_cast<size_t>(energy_bins)});
 
-  double total_B = 0.0;
-  double total_S = 0.0;
-
+  // Calculate biasing parameters and simultaneously check to see if any
+  // voxels containing probability mass associated with the unbiased source
+  // have not been sampled.
+  double total_strength = 0.0;
+  double total_missed_S = 0.0;
   for (int64_t m = 0; m < spatial_bins; ++m) {
     for (int64_t a = 0; a < angle_bins; ++a) {
       for (int64_t e = 0; e < energy_bins; ++e) {
         double psi = flux_(m, a, e);
         double b = psi * unbiased_strength_(m, a, e);
-
         biased_strength(m, a, e) = b;
-        total_B += b;
-        total_S += unbiased_strength_(m, a, e);
+        total_strength += b;
+        if (psi <= 0.0) {
+          total_missed_S += unbiased_strength_(m, a, e);
+        }
       }
     }
   }
 
-  // The correct per-voxel weight is [sum(B)/sum(S)] / flux(voxel)
-  double weight_norm = (total_S > 0.0) ? total_B / total_S : 1.0;
+  if (total_missed_S > TINY_BIT) {
+    fatal_error(fmt::format("Biased source does not sample whole support of "
+                            "the unbiased source. Probability mass lost in "
+                            "regions with nonpositive adjoint flux: {}.",
+      total_missed_S));
+  }
 
+  // Rescale biased strengths so that they add up to probability 1.0.
+  // This would be done anyway by the DiscreteIndex inside of CorrelatedSource
+  // when sampling a phase space bin, but the normalization should be done
+  // beforehand so that source's .strength() attribute still appears as 1.0.
+  // Also apply sample weight of (total_strength / psi) so that total
+  // probability mass still equals 1.0.
   for (int64_t m = 0; m < spatial_bins; ++m) {
     for (int64_t a = 0; a < angle_bins; ++a) {
       for (int64_t e = 0; e < energy_bins; ++e) {
         double psi = flux_(m, a, e);
-        weights(m, a, e) = psi > 0.0 ? weight_norm / psi : 0.0;
+        weights(m, a, e) = psi > 0.0 ? total_strength / psi : 0.0;
+        biased_strength(m, a, e) /= total_strength;
       }
     }
   }

@@ -246,9 +246,6 @@ public:
   int32_t angle_mesh_idx() const { return angle_mesh_idx_; }
   const vector<double>& group_bounds() const { return group_bounds_; }
 
-protected:
-  bool constraints_applied() const override { return true; }
-
 private:
   // Data members
   int32_t spatial_mesh_idx_ {C_NONE}; //!< Index into model::meshes

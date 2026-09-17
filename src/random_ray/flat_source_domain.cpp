@@ -228,12 +228,36 @@ void FlatSourceDomain::set_flux_to_flux_plus_source(
         0.5f * source_regions_.external_source(sr, g) *
         source_regions_.volume_sq(sr);
     }
+    // Divide source term evenly among angular bins
+    if (source_regions_.needs_angular_flux(sr)) {
+      float source_term = 0.0f;
+      if (settings::run_mode == RunMode::FIXED_SOURCE) {
+        source_term =
+          source_regions_.external_source(sr, g) / source_regions_.nangles();
+      }
+      for (int a = 0; a < source_regions_.nangles(); a++) {
+        source_regions_.angular_flux_new(sr, g, a) /= volume;
+        if (settings::run_mode == RunMode::FIXED_SOURCE) {
+          source_regions_.angular_flux_new(sr, g, a) +=
+            0.5f * source_term * source_regions_.volume_sq(sr);
+        }
+      }
+    }
   } else {
     double sigma_t =
       sigma_t_[(material * ntemperature_ + temp) * negroups_ + g] *
       source_regions_.density_mult(sr);
     source_regions_.scalar_flux_new(sr, g) /= (sigma_t * volume);
     source_regions_.scalar_flux_new(sr, g) += source_regions_.source(sr, g);
+    // Divide source term evenly among angular bins
+    if (source_regions_.needs_angular_flux(sr)) {
+      float source_term =
+        source_regions_.source(sr, g) / source_regions_.nangles();
+      for (int a = 0; a < source_regions_.nangles(); a++) {
+        source_regions_.angular_flux_new(sr, g, a) /= (sigma_t * volume);
+        source_regions_.angular_flux_new(sr, g, a) += source_term;
+      }
+    }
   }
 }
 
@@ -241,16 +265,38 @@ void FlatSourceDomain::set_flux_to_old_flux(int64_t sr, int g)
 {
   source_regions_.scalar_flux_new(sr, g) =
     source_regions_.scalar_flux_old(sr, g);
+  if (source_regions_.needs_angular_flux(sr)) {
+    // To minimize memory use, we don't store the previous iteration's
+    // angular fluxes. Recognizing that this case only occurs in the few
+    // percent or less of source regions missed during an iteration, we
+    // approximate the angular flux by dividing the scalar flux estimate
+    // evenly across all angles.
+    double isotropic_flux =
+      source_regions_.scalar_flux_new(sr, g) / source_regions_.nangles();
+    for (int a = 0; a < source_regions_.nangles(); a++) {
+      source_regions_.angular_flux_new(sr, g, a) = isotropic_flux;
+    }
+  }
 }
 
 void FlatSourceDomain::set_flux_to_source(int64_t sr, int g)
 {
   source_regions_.scalar_flux_new(sr, g) = source_regions_.source(sr, g);
+  if (source_regions_.needs_angular_flux(sr)) {
+    // Divide source term evenly across angles
+    float source_term =
+      source_regions_.source(sr, g) / source_regions_.nangles();
+    for (int a = 0; a < source_regions_.nangles(); a++) {
+      source_regions_.angular_flux_new(sr, g, a) = source_term;
+    }
+  }
 }
 
 // Combine transport flux contributions and flat source contributions from the
 // previous iteration to generate this iteration's estimate of scalar flux.
-// Not performed for angular flux as sources are isotropic
+// Source terms are evenly distributed across angular flux as sources are
+// isotropic; this however assumes that the reference angles' Voronoi cells 
+// subtend approximately equal solid angles on the surface of the unit sphere.
 int64_t FlatSourceDomain::add_source_to_scalar_flux()
 {
   int64_t n_hits = 0;
@@ -2041,6 +2087,12 @@ int64_t FlatSourceDomain::lookup_mesh_bin(int64_t sr, Position r) const
 // stored in the referenced angular mesh.
 int FlatSourceDomain::lookup_angular_bin(Direction u) const
 {
+  if (solve_ == RandomRaySolve::ADJOINT) {
+    // Flip direction in adjoint mode, since the ray is actually traveling in 
+    // the direction -(Omega), whereas we want to tally the importance of a 
+    // particle traveling in the forward direction Omega
+    u = -u;
+  }
   return angular_mesh_->get_bin(u);
 }
 
